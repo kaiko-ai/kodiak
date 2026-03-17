@@ -86,10 +86,10 @@
                 "reviewThreads": {
                     "nodes": [
                         {
-                            "isCollapsed": true
+                            "isResolved": true
                         },
                         {
-                            "isCollapsed": false
+                            "isResolved": false
                         }
                     ]
                 },

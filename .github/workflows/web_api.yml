@@ -3,6 +3,8 @@ name: web_api
 on:
   pull_request:
 
+permissions: {}
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
   cancel-in-progress: true
@@ -10,6 +12,7 @@ concurrency:
 jobs:
   pre_job:
     runs-on: ubuntu-24.04
+    permissions: {}
     outputs:
       should_skip: ${{ steps.skip_check.outputs.should_skip }}
       paths_result: ${{ steps.skip_check.outputs.paths_result }}
@@ -23,6 +26,7 @@ jobs:
     needs: pre_job
     if: needs.pre_job.outputs.should_skip != 'true'
     runs-on: ubuntu-24.04
+    permissions: {}
     services:
       postgres:
         image: postgres:12
@@ -50,9 +54,11 @@ jobs:
           # Maps port 6379 on service container to the host
           - 6379:6379
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           version: "0.9.11"
       - name: Install dependencies
@@ -70,10 +76,13 @@ jobs:
     needs: pre_job
     if: needs.pre_job.outputs.should_skip != 'true'
     runs-on: ubuntu-24.04
+    permissions: {}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           version: "0.9.11"
       - name: Install dependencies
@@ -87,27 +96,14 @@ jobs:
     needs: pre_job
     if: needs.pre_job.outputs.should_skip != 'true'
     runs-on: ubuntu-24.04
-    services:
-      postgres:
-        image: postgres:12
-        # Provide the password for postgres
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: web_api_test
-        ports:
-          - 5432:5432
-        # Set health checks to wait until postgres has started
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    permissions: {}
     steps:
-      - uses: actions/checkout@v1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           version: "0.9.11"
       - name: Install dependencies
@@ -117,7 +113,7 @@ jobs:
         working-directory: "./web_api"
         run: |
           python ./s/squawk.py
-      - uses: sbdchd/squawk-action@v1
+      - uses: sbdchd/squawk-action@8db78777d723f75b9dc039aa5b5d45c71b94c289 # v1
         with:
           pattern: "web_api/migrations/*.sql"
           version: "latest"

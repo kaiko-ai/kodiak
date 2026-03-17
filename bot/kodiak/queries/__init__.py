@@ -237,7 +237,7 @@ query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
       }
       reviewThreads(first: 100) {
         nodes {
-          isCollapsed
+          isResolved
         }
       }
       title
@@ -431,7 +431,7 @@ class PullRequestReviewDecision(Enum):
 
 
 class ReviewThread(BaseModel):
-    isCollapsed: bool
+    isResolved: bool
 
 
 class ReviewThreadConnection(BaseModel):

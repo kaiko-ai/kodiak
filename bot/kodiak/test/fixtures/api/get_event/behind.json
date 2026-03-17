@@ -83,8 +83,8 @@
         },
         "reviewThreads": {
           "nodes": [
-            {"isCollapsed": true},
-            {"isCollapsed": false}
+            {"isResolved": true},
+            {"isResolved": false}
           ]
         },
         "title": "Update README.md",
