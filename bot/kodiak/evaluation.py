@@ -1035,7 +1035,7 @@ async def mergeable(
         if (
             requires_conversation_resolution(branch_protection, ruleset_rules)
             and pull_request.reviewThreads.nodes is not None
-            and any(pr.isCollapsed is False for pr in pull_request.reviewThreads.nodes)
+            and any(pr.isResolved is False for pr in pull_request.reviewThreads.nodes)
         ):
             await block_merge(api, pull_request, "unresolved conversations")
             return

@@ -658,8 +658,8 @@ async def test_mergeable_requires_conversation_resolution() -> None:
 
     pull_request.mergeStateStatus = MergeStateStatus.BLOCKED
     pull_request.reviewThreads.nodes = [
-        ReviewThread(isCollapsed=True),
-        ReviewThread(isCollapsed=False),
+        ReviewThread(isResolved=True),
+        ReviewThread(isResolved=False),
     ]
     branch_protection.requiresConversationResolution = True
 
@@ -673,7 +673,7 @@ async def test_mergeable_requires_conversation_resolution() -> None:
     assert "cannot merge (unresolved conversations)" in api.set_status.calls[0]["msg"]
 
 
-async def test_mergeable_uncollapsed_reviews() -> None:
+async def test_mergeable_unresolved_reviews() -> None:
     """
     We should only block merge for unresolved review threads if
     requiresConversationResolution is enabled.
@@ -686,8 +686,8 @@ async def test_mergeable_uncollapsed_reviews() -> None:
 
     pull_request.mergeStateStatus = MergeStateStatus.BLOCKED
     pull_request.reviewThreads.nodes = [
-        ReviewThread(isCollapsed=True),
-        ReviewThread(isCollapsed=False),
+        ReviewThread(isResolved=True),
+        ReviewThread(isResolved=False),
     ]
 
     await mergeable(
