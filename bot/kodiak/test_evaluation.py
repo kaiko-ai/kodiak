@@ -2073,6 +2073,29 @@ async def test_mergeable_auto_approve_ignore_draft_pr() -> None:
         assert api.update_branch.call_count == 0
 
 
+async def test_mergeable_auto_approve_skipped_without_automerge_label() -> None:
+    """
+    If a PR matches auto_approve_usernames but does not have an automerge
+    label (and require_automerge_label is True), Kodiak should NOT approve
+    the PR. Approving a PR that will be immediately ignored is confusing.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    config = create_config()
+    pull_request = create_pull_request()
+    config.approve.auto_approve_usernames = ["dependency-updater"]
+    assert pull_request.author is not None
+    pull_request.author.login = "dependency-updater"
+    # Remove automerge label so the PR will be ignored
+    pull_request.labels = ["bugfix"]
+    assert config.merge.require_automerge_label is True
+    await mergeable(api=api, config=config, pull_request=pull_request, bot_reviews=[])
+    assert api.approve_pull_request.call_count == 0
+    assert api.dequeue.call_count == 1
+    assert api.queue_for_merge.call_count == 0
+    assert api.merge.call_count == 0
+
+
 async def test_mergeable_paywall_missing_subscription() -> None:
     """
     If a subscription is missing we should not raise the paywall. The web_api
