@@ -20,6 +20,10 @@ concurrency:
 
 env:
   SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  REGISTRY: ghcr.io
+  BOT_IMAGE: ghcr.io/${{ github.repository }}
+  API_IMAGE: ghcr.io/${{ github.repository }}-web-api
+  UI_IMAGE: ghcr.io/${{ github.repository }}-web-ui
 
 jobs:
   lint_shell:
@@ -73,7 +77,7 @@ jobs:
           context: "{{defaultContext}}:bot"
           file: "Dockerfile"
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=ghcr.io/kaiko-ai/kodiak,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.BOT_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=kodiak-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,scope=kodiak-${{ env.PLATFORM_PAIR }},mode=max
           provenance: false
@@ -118,11 +122,11 @@ jobs:
         working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
-            -t "ghcr.io/kaiko-ai/kodiak:$SHA" \
-            $(printf 'ghcr.io/kaiko-ai/kodiak@sha256:%s ' *)
+            -t "$BOT_IMAGE:$SHA" \
+            $(printf "$BOT_IMAGE@sha256:%s " *)
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect "ghcr.io/kaiko-ai/kodiak:$SHA"
+          docker buildx imagetools inspect "$BOT_IMAGE:$SHA"
 
   # ---------------------------------------------------------------------------
   # Web API image
@@ -163,7 +167,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             GIT_SHA=${{ env.SHA }}
-          outputs: type=image,name=ghcr.io/kaiko-ai/kodiak-web-api,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.API_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=kodiak-web-api-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,scope=kodiak-web-api-${{ env.PLATFORM_PAIR }},mode=max
           provenance: false
@@ -208,11 +212,11 @@ jobs:
         working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
-            -t "ghcr.io/kaiko-ai/kodiak-web-api:$SHA" \
-            $(printf 'ghcr.io/kaiko-ai/kodiak-web-api@sha256:%s ' *)
+            -t "$API_IMAGE:$SHA" \
+            $(printf "$API_IMAGE@sha256:%s " *)
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect "ghcr.io/kaiko-ai/kodiak-web-api:$SHA"
+          docker buildx imagetools inspect "$API_IMAGE:$SHA"
 
   # ---------------------------------------------------------------------------
   # Web UI image
@@ -253,7 +257,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             GIT_SHA=${{ env.SHA }}
-          outputs: type=image,name=ghcr.io/kaiko-ai/kodiak-web-ui,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.UI_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=kodiak-web-ui-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,scope=kodiak-web-ui-${{ env.PLATFORM_PAIR }},mode=max
           provenance: false
@@ -298,8 +302,8 @@ jobs:
         working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
-            -t "ghcr.io/kaiko-ai/kodiak-web-ui:$SHA" \
-            $(printf 'ghcr.io/kaiko-ai/kodiak-web-ui@sha256:%s ' *)
+            -t "$UI_IMAGE:$SHA" \
+            $(printf "$UI_IMAGE@sha256:%s " *)
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect "ghcr.io/kaiko-ai/kodiak-web-ui:$SHA"
+          docker buildx imagetools inspect "$UI_IMAGE:$SHA"
