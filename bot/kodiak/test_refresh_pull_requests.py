@@ -83,7 +83,12 @@ class TestIsPrPotentiallyActionable:
             "labels": {"nodes": [{"name": "ship-it"}]},
             "baseRef": {"name": "main"},
         }
-        assert _is_pr_potentially_actionable(pr, automerge_labels=frozenset({"ship-it"})) is True
+        assert (
+            _is_pr_potentially_actionable(
+                pr, automerge_labels=frozenset({"ship-it"})
+            )
+            is True
+        )
         assert _is_pr_potentially_actionable(pr) is False
 
     def test_non_draft_without_isDraft_field_is_not_skipped(self) -> None:

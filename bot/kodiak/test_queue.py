@@ -1,3 +1,4 @@
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -32,8 +33,9 @@ class TestWebhookConsumerConcurrency:
         """
         queue = RedisWebhookQueue()
         concurrency = 4
-        with patch("kodiak.queue.conf.WEBHOOK_CONSUMER_CONCURRENCY", concurrency), \
-             patch("kodiak.queue.asyncio.create_task") as mock_create_task:
+        with patch(
+            "kodiak.queue.conf.WEBHOOK_CONSUMER_CONCURRENCY", concurrency
+        ), patch("kodiak.queue.asyncio.create_task") as mock_create_task:
             mock_create_task.return_value = _FakeTask()
             queue.start_webhook_worker(queue_name="webhook:12345")
 
@@ -51,8 +53,9 @@ class TestWebhookConsumerConcurrency:
         """
         queue = RedisWebhookQueue()
         concurrency = 2
-        with patch("kodiak.queue.conf.WEBHOOK_CONSUMER_CONCURRENCY", concurrency), \
-             patch("kodiak.queue.asyncio.create_task") as mock_create_task:
+        with patch(
+            "kodiak.queue.conf.WEBHOOK_CONSUMER_CONCURRENCY", concurrency
+        ), patch("kodiak.queue.asyncio.create_task") as mock_create_task:
             mock_create_task.return_value = _FakeTask()
             queue.start_webhook_worker(queue_name="webhook:12345")
             first_call_count = mock_create_task.call_count
@@ -68,8 +71,9 @@ class TestWebhookConsumerConcurrency:
         """
         queue = RedisWebhookQueue()
         concurrency = 3
-        with patch("kodiak.queue.conf.WEBHOOK_CONSUMER_CONCURRENCY", concurrency), \
-             patch("kodiak.queue.asyncio.create_task") as mock_create_task:
+        with patch(
+            "kodiak.queue.conf.WEBHOOK_CONSUMER_CONCURRENCY", concurrency
+        ), patch("kodiak.queue.asyncio.create_task") as mock_create_task:
             mock_create_task.return_value = _FakeTask()
             queue.start_webhook_worker(queue_name="webhook:99999")
 
@@ -86,12 +90,16 @@ class TestWebhookConsumerConcurrency:
         queue = RedisWebhookQueue()
         with patch("kodiak.queue.asyncio.create_task") as mock_create_task:
             mock_create_task.return_value = _FakeTask()
-            queue.start_repo_worker(queue_name="merge_queue:12345.owner/repo/main")
+            queue.start_repo_worker(
+                queue_name="merge_queue:12345.owner/repo/main"
+            )
 
         assert "merge_queue:12345.owner/repo/main" in queue.worker_tasks
         tasks = list(queue.all_tasks())
         assert len(tasks) == 1
-        assert tasks[0][0] == TaskMeta(kind="repo", queue_name="merge_queue:12345.owner/repo/main")
+        assert tasks[0][0] == TaskMeta(
+            kind="repo", queue_name="merge_queue:12345.owner/repo/main"
+        )
 
 
 class _FakeTask:
@@ -100,5 +108,5 @@ class _FakeTask:
     def done(self) -> bool:
         return False
 
-    def exception(self) -> BaseException | None:
+    def exception(self) -> Optional[BaseException]:
         return None
