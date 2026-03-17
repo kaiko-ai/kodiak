@@ -122,7 +122,7 @@ DEFAULT_AUTOMERGE_LABELS = frozenset({"automerge", "dependencies", "version-bump
 
 
 def _is_pr_potentially_actionable(
-    pull_request: dict,
+    pull_request: dict[str, object],
     automerge_labels: frozenset[str] = DEFAULT_AUTOMERGE_LABELS,
 ) -> bool:
     """

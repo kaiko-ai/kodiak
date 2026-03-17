@@ -507,6 +507,7 @@ class RedisWebhookQueue:
         if worker_task_result is not None:
             worker_task, _task_kind = worker_task_result
             if not worker_task.done():
+                fut.close()
                 return
             log.info("task failed")
             # task failed. record result and restart
