@@ -818,6 +818,14 @@ async def mergeable(
         )
         and pull_request.state == PullRequestState.OPEN
         and not is_draft_pull_request
+        # Don't approve PRs that will be immediately ignored for missing an
+        # automerge label — approval is only meaningful if the PR is actually
+        # eligible for merge.
+        and (
+            not config.merge.require_automerge_label
+            or has_automerge_label
+            or should_dependency_automerge
+        )
     ):
         # if the PR was created by an approve author or has an approve label
         # and we have not previously given an approval, approve the PR.
