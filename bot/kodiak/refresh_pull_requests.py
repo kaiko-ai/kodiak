@@ -15,7 +15,7 @@ import asyncio
 import logging
 import sys
 import time
-from typing import cast
+from typing import Any, cast
 
 import sentry_sdk
 import structlog
@@ -122,7 +122,7 @@ DEFAULT_AUTOMERGE_LABELS = frozenset({"automerge", "dependencies", "version-bump
 
 
 def _is_pr_potentially_actionable(
-    pull_request: dict[str, object],
+    pull_request: dict[str, Any],
     automerge_labels: frozenset[str] = DEFAULT_AUTOMERGE_LABELS,
 ) -> bool:
     """
