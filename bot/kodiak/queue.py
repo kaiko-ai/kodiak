@@ -479,11 +479,13 @@ class RedisWebhookQueue:
             self.start_webhook_worker(queue_name=queue_name)
 
     def start_webhook_worker(self, *, queue_name: str) -> None:
-        self._start_worker(
-            queue_name,
-            "webhook",
-            webhook_event_consumer(webhook_queue=self, queue_name=queue_name),
-        )
+        for i in range(conf.WEBHOOK_CONSUMER_CONCURRENCY):
+            worker_key = f"{queue_name}:worker:{i}"
+            self._start_worker(
+                worker_key,
+                "webhook",
+                webhook_event_consumer(webhook_queue=self, queue_name=queue_name),
+            )
 
     def start_repo_worker(self, *, queue_name: str) -> None:
         self._start_worker(
@@ -577,7 +579,14 @@ class RedisWebhookQueue:
         return find_position((key for key, value in kvs), event.json().encode())
 
     def all_tasks(self) -> Iterator[tuple[TaskMeta, Task[NoReturn]]]:
-        for queue_name, (task, task_kind) in self.worker_tasks.items():
+        for worker_key, (task, task_kind) in self.worker_tasks.items():
+            # For webhook workers the key is "queue_name:worker:N",
+            # for repo workers it's just the queue name.
+            if task_kind == "webhook":
+                # Strip ":worker:N" suffix to recover the original queue name.
+                queue_name = worker_key.rsplit(":worker:", 1)[0]
+            else:
+                queue_name = worker_key
             yield (TaskMeta(kind=task_kind, queue_name=queue_name), task)
 
 
