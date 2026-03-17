@@ -65,6 +65,13 @@ REDIS_SOCKET_CONNECT_TIMEOUT_SEC = config(
     "REDIS_SOCKET_CONNECT_TIMEOUT_SEC", cast=int, default=30
 )
 
+# Number of concurrent webhook consumer tasks per installation.
+# Each consumer pops events from the same Redis sorted set (BZPOPMIN is atomic),
+# so increasing this allows parallel PR evaluations within one installation.
+WEBHOOK_CONSUMER_CONCURRENCY = config(
+    "WEBHOOK_CONSUMER_CONCURRENCY", cast=int, default=3
+)
+
 SUBSCRIPTIONS_ENABLED = config("SUBSCRIPTIONS_ENABLED", cast=bool, default=False)
 
 # For GitHub Enterprise, the v3 API root has the form:
