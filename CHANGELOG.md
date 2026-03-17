@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 0.59.1 - 2026-03-12
+
+### Fixed
+
+- Suppress warning about null branch protection rules. (#912)
+
+## 0.59.0 - 2026-03-12
+
+### Changed
+
+- Reduced GitHub GraphQL API cost from 4 units to 2 units. (#911)
+
+## 0.58.1 - 2026-03-12
+
+### Fixed
+
+- Handle bots as requested reviewers. (#911)
+
+## 0.58.0 - 2026-03-12
+
+### Changed
+
+- Removed workaround for GitHub GraphQL bug introduced in #908. (#910)
+
 ## 0.57.0 - 2026-02-26
 
 ### Added
@@ -18,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added workaround for GitHub GraphQL bug. (#908)
 
 ### Changed
+
 - Split GitHub API throttling into separate REST API and GraphQL API throttlers. (#908)
 
 ## 0.56.0 - 2025-12-12

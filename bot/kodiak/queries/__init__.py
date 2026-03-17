@@ -7,7 +7,6 @@ from enum import Enum
 from typing import (
     Any,
     Dict,
-    Iterator,
     List,
     Mapping,
     MutableMapping,
@@ -170,30 +169,6 @@ def get_event_info_query(
     return """
 query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
   repository(owner: $owner, name: $repo) {
-    branchProtectionRules(first: 100) {
-      nodes {
-        matchingRefs(first: 100) {
-          nodes {
-            name
-          }
-        }
-        requiresStatusChecks
-        requiredStatusCheckContexts
-        requiresStrictStatusChecks
-        requiresCommitSignatures
-        %(requiresConversationResolution)s
-        restrictsPushes
-        pushAllowances(first: 100) {
-          nodes {
-            actor {
-              ... on App {
-                databaseId
-              }
-            }
-          }
-        }
-      }
-    }
     mergeCommitAllowed
     rebaseMergeAllowed
     squashMergeAllowed
@@ -223,14 +198,11 @@ query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
           asCodeOwner
           requestedReviewer {
             __typename
-            ... on User {
+            ... on Actor {
               login
             }
             ... on Team {
               name
-            }
-            ... on Mannequin {
-              login
             }
           }
         }
@@ -264,9 +236,26 @@ query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
       }
       baseRef {
         name
+        branchProtectionRule {
+          requiresStatusChecks
+          requiredStatusCheckContexts
+          requiresStrictStatusChecks
+          requiresCommitSignatures
+          %(requiresConversationResolution)s
+          restrictsPushes
+          pushAllowances(first: 100) {
+            nodes {
+              actor {
+                ... on App {
+                  databaseId
+                }
+              }
+            }
+          }
+        }
         rules(first: 100) {
           nodes {
-            id
+            type
             parameters {
               ... on RequiredStatusChecksParameters {
                 requiredStatusChecks {
@@ -289,13 +278,6 @@ query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
                   }
                 }
               }
-
-                rules(first: 100) {
-                    nodes {
-                        id
-                        type
-                    }
-                }
             }
           }
         }
@@ -481,7 +463,7 @@ class EventInfoResponse:
     repository: RepoInfo
     subscription: Optional[Subscription]
     branch_protection: Optional[BranchProtectionRule]
-    ruleset_rules: List[ParsedRulesetRule]
+    ruleset_rules: List[RulesetRule]
     review_requests: List[PRReviewRequest]
     head_exists: bool
     bot_reviews: List[PRReview] = field(default_factory=list)
@@ -587,22 +569,12 @@ class RepositoryRulesetBypassActorConnection(BaseModel):
     nodes: Optional[List[Optional[RepositoryRulesetBypassActor]]] = None
 
 
-class RepositoryRulePartial(BaseModel):
-    id: str
-    type: str
-
-
-class RepositoryRulesetConnection(BaseModel):
-    nodes: Optional[List[Optional[RepositoryRulePartial]]] = None
-
-
 class RepositoryRuleset(BaseModel):
     bypassActors: Optional[RepositoryRulesetBypassActorConnection] = None
-    rules: Optional[RepositoryRulesetConnection] = None
 
 
 class RulesetRule(BaseModel):
-    id: str
+    type: str
     parameters: Union[
         MergeQueueParameters,
         PullRequestParameters,
@@ -617,19 +589,6 @@ class RulesetRule(BaseModel):
         if values.get("parameters") == {}:
             values["parameters"] = None
         return values
-
-
-@dataclass
-class ParsedRulesetRule:
-    type: str
-    parameters: Union[
-        MergeQueueParameters,
-        PullRequestParameters,
-        RequiredStatusChecksParameters,
-        UpdateParameters,
-        None,
-    ] = None
-    repositoryRuleset: Optional[RepositoryRuleset] = None
 
 
 class PRReviewState(Enum):
@@ -755,29 +714,17 @@ def get_sha(*, pr: Dict[str, Any]) -> Optional[str]:
         return None
 
 
-def get_branch_protection_dicts(*, repo: Dict[str, Any]) -> List[Dict[str, Any]]:
-    try:
-        return cast(List[Dict[str, Any]], repo["branchProtectionRules"]["nodes"])
-    except (KeyError, TypeError):
-        return []
-
-
 def get_branch_protection(
-    *, repo: Dict[str, Any], ref_name: str
+    *, pull_request: Dict[str, Any]
 ) -> Optional[BranchProtectionRule]:
-    for rule in get_branch_protection_dicts(repo=repo):
-        try:
-            nodes = rule["matchingRefs"]["nodes"]
-        except (KeyError, TypeError):
-            nodes = []
-        for node in nodes:
-            if node["name"] == ref_name:
-                try:
-                    return BranchProtectionRule.parse_obj(rule)
-                except ValueError:
-                    logger.warning("Could not parse branch protection", exc_info=True)
-                    return None
-    return None
+    try:
+        rule = pull_request["baseRef"]["branchProtectionRule"]
+        if rule is None:
+            return None
+        return BranchProtectionRule.parse_obj(rule)
+    except (ValueError, KeyError, TypeError):
+        logger.warning("Could not parse branch protection", exc_info=True)
+        return None
 
 
 def get_rules_dicts(*, pull_request: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -787,49 +734,13 @@ def get_rules_dicts(*, pull_request: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
 
 
-def find_rule_type(rule: RulesetRule) -> str | None:
-    if (
-        rule.repositoryRuleset
-        and rule.repositoryRuleset.rules
-        and rule.repositoryRuleset.rules.nodes
-    ):
-        for node in rule.repositoryRuleset.rules.nodes:
-            if node and node.id == rule.id:
-                return node.type
-    return None
-
-
-def find_bypass_actor_ids(rule: RulesetRule) -> Iterator[int | None]:
-    if (
-        rule.repositoryRuleset
-        and rule.repositoryRuleset.bypassActors
-        and rule.repositoryRuleset.bypassActors.nodes
-    ):
-        for node in rule.repositoryRuleset.bypassActors.nodes:
-            if node and node.actor and node.actor.databaseId:
-                yield node.actor.databaseId
-            else:
-                yield None
-    return None
-
-
-def get_ruleset_rules(*, pull_request: Dict[str, Any]) -> List[ParsedRulesetRule]:
+def get_ruleset_rules(*, pull_request: Dict[str, Any]) -> List[RulesetRule]:
     rules = []
     for node in get_rules_dicts(pull_request=pull_request):
         try:
-            rule = RulesetRule.parse_obj(node)
+            rules.append(RulesetRule.parse_obj(node))
         except ValueError:
             logger.warning("Could not parse RulesetRule", exc_info=True)
-            continue
-        rule_type = find_rule_type(rule)
-        if rule_type:
-            rules.append(
-                ParsedRulesetRule(
-                    parameters=rule.parameters,
-                    type=rule_type,
-                    repositoryRuleset=rule.repositoryRuleset,
-                )
-            )
     return rules
 
 
@@ -851,11 +762,12 @@ def get_requested_reviews(*, pr: Dict[str, Any]) -> List[PRReviewRequest]:
             request = request_dict["requestedReviewer"]
             if request is None:
                 continue
-            typename = request["__typename"]
-            if typename in {"User", "Mannequin"}:
+            if "login" in request:
                 name = request["login"]
-            else:
+            elif "name" in request:
                 name = request["name"]
+            else:
+                continue
             review_requests.append(
                 PRReviewRequest(name=name, asCodeOwner=bool(asCodeOwner))
             )
@@ -1025,8 +937,7 @@ class ThrottlerProtocol(Protocol):
 
 
 class Client:
-    graphql_throttler: ThrottlerProtocol
-    rest_throttler: ThrottlerProtocol
+    throttler: ThrottlerProtocol
 
     def __init__(self, *, owner: str, repo: str, installation_id: str):
         self.owner = owner
@@ -1054,11 +965,8 @@ class Client:
         )
 
     async def __aenter__(self) -> Client:
-        self.graphql_throttler = get_thottler_for_installation(
-            installation_id=self.installation_id, kind="graphql"
-        )
-        self.rest_throttler = get_thottler_for_installation(
-            installation_id=self.installation_id, kind="rest"
+        self.throttler = get_thottler_for_installation(
+            installation_id=self.installation_id
         )
         return self
 
@@ -1079,7 +987,7 @@ class Client:
             session=self.session, installation_id=installation_id
         )
         self.session.headers["Authorization"] = f"Bearer {token}"
-        async with self.graphql_throttler:
+        async with self.throttler:
             res = await self.session.post(
                 conf.GITHUB_V4_API_URL, json=(dict(query=query, variables=variables))
             )
@@ -1317,9 +1225,7 @@ query {
             log.info("no config found")
             return None
 
-        branch_protection = get_branch_protection(
-            repo=repository, ref_name=pr.baseRefName
-        )
+        branch_protection = get_branch_protection(pull_request=pull_request)
         ruleset_rules = get_ruleset_rules(pull_request=pull_request)
 
         all_reviews = get_reviews(pr=pull_request)
@@ -1375,7 +1281,7 @@ query {
                 break
 
             params["page"] = str(current_page)
-            async with self.rest_throttler:
+            async with self.throttler:
                 res = await self.session.get(
                     conf.v3_url(f"/repos/{self.owner}/{self.repo}/pulls"),
                     params=params,
@@ -1400,7 +1306,7 @@ query {
             session=self.session, installation_id=self.installation_id
         )
         ref = urllib.parse.quote(f"heads/{branch}")
-        async with self.rest_throttler:
+        async with self.throttler:
             return await self.session.delete(
                 conf.v3_url(f"/repos/{self.owner}/{self.repo}/git/refs/{ref}"),
                 headers=headers,
@@ -1410,7 +1316,7 @@ query {
         headers = await get_headers(
             session=self.session, installation_id=self.installation_id
         )
-        async with self.rest_throttler:
+        async with self.throttler:
             return await self.session.put(
                 conf.v3_url(
                     f"/repos/{self.owner}/{self.repo}/pulls/{pull_number}/update-branch"
@@ -1426,7 +1332,7 @@ query {
             session=self.session, installation_id=self.installation_id
         )
         body = dict(event="APPROVE")
-        async with self.rest_throttler:
+        async with self.throttler:
             return await self.session.post(
                 conf.v3_url(
                     f"/repos/{self.owner}/{self.repo}/pulls/{pull_number}/reviews"
@@ -1440,7 +1346,7 @@ query {
             session=self.session, installation_id=self.installation_id
         )
         url = conf.v3_url(f"/repos/{self.owner}/{self.repo}/pulls/{number}")
-        async with self.rest_throttler:
+        async with self.throttler:
             return await self.session.get(url, headers=headers)
 
     async def merge_pull_request(
@@ -1463,7 +1369,7 @@ query {
             session=self.session, installation_id=self.installation_id
         )
         url = conf.v3_url(f"/repos/{self.owner}/{self.repo}/pulls/{number}/merge")
-        async with self.rest_throttler:
+        async with self.throttler:
             return await self.session.put(url, headers=headers, json=body)
 
     async def update_ref(self, *, ref: str, sha: str) -> http.Response:
@@ -1474,7 +1380,7 @@ query {
             session=self.session, installation_id=self.installation_id
         )
         url = conf.v3_url(f"/repos/{self.owner}/{self.repo}/git/refs/heads/{ref}")
-        async with self.rest_throttler:
+        async with self.throttler:
             return await self.session.patch(url, headers=headers, json=dict(sha=sha))
 
     async def create_notification(
@@ -1492,14 +1398,14 @@ query {
             conclusion="neutral",
             output=dict(title=message, summary=summary or ""),
         )
-        async with self.rest_throttler:
+        async with self.throttler:
             return await self.session.post(url, headers=headers, json=body)
 
     async def add_label(self, label: str, pull_number: int) -> http.Response:
         headers = await get_headers(
             session=self.session, installation_id=self.installation_id
         )
-        async with self.rest_throttler:
+        async with self.throttler:
             return await self.session.post(
                 conf.v3_url(
                     f"/repos/{self.owner}/{self.repo}/issues/{pull_number}/labels"
@@ -1513,7 +1419,7 @@ query {
             session=self.session, installation_id=self.installation_id
         )
         escaped_label = urllib.parse.quote(label)
-        async with self.rest_throttler:
+        async with self.throttler:
             return await self.session.delete(
                 conf.v3_url(
                     f"/repos/{self.owner}/{self.repo}/issues/{pull_number}/labels/{escaped_label}"
@@ -1525,7 +1431,7 @@ query {
         headers = await get_headers(
             session=self.session, installation_id=self.installation_id
         )
-        async with self.rest_throttler:
+        async with self.throttler:
             return await self.session.post(
                 conf.v3_url(
                     f"/repos/{self.owner}/{self.repo}/issues/{pull_number}/comments"
@@ -1593,13 +1499,12 @@ async def get_token_for_install(
     app_token = generate_jwt(
         private_key=conf.PRIVATE_KEY, app_identifier=conf.GITHUB_APP_ID
     )
-    kodiak_app_throttler = get_thottler_for_installation(
+    throttler = get_thottler_for_installation(
         # this isn't a real installation ID, but it provides rate limiting
         # for our GithubApp instead of the installations we typically act as
-        installation_id=APPLICATION_ID,
-        kind="kodiak_app",
+        installation_id=APPLICATION_ID
     )
-    async with kodiak_app_throttler:
+    async with throttler:
         res = await session.post(
             conf.v3_url(f"/app/installations/{installation_id}/access_tokens"),
             headers=dict(
