@@ -1,5 +1,3 @@
-import pytest
-
 from kodiak.refresh_pull_requests import _is_pr_potentially_actionable
 
 
@@ -84,14 +82,12 @@ class TestIsPrPotentiallyActionable:
             "baseRef": {"name": "main"},
         }
         assert (
-            _is_pr_potentially_actionable(
-                pr, automerge_labels=frozenset({"ship-it"})
-            )
+            _is_pr_potentially_actionable(pr, automerge_labels=frozenset({"ship-it"}))
             is True
         )
         assert _is_pr_potentially_actionable(pr) is False
 
-    def test_non_draft_without_isDraft_field_is_not_skipped(self) -> None:
+    def test_non_draft_without_is_draft_field_is_not_skipped(self) -> None:
         """Missing isDraft should default to not-draft."""
         pr = {
             "number": 10,

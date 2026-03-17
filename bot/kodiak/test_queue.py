@@ -25,6 +25,15 @@ def test_installation_id_from_queue(
     assert installation_id_from_queue(queue_name) == expected_installation_id
 
 
+def _fake_create_task(coro):  # type: ignore[no-untyped-def]
+    """
+    Stand-in for asyncio.create_task that closes the coroutine (to avoid
+    'coroutine was never awaited' warnings) and returns a _FakeTask.
+    """
+    coro.close()
+    return _FakeTask()
+
+
 class TestWebhookConsumerConcurrency:
     def test_start_webhook_worker_creates_multiple_tasks(self) -> None:
         """
@@ -35,8 +44,9 @@ class TestWebhookConsumerConcurrency:
         concurrency = 4
         with patch(
             "kodiak.queue.conf.WEBHOOK_CONSUMER_CONCURRENCY", concurrency
-        ), patch("kodiak.queue.asyncio.create_task") as mock_create_task:
-            mock_create_task.return_value = _FakeTask()
+        ), patch(
+            "kodiak.queue.asyncio.create_task", side_effect=_fake_create_task
+        ) as mock_create_task:
             queue.start_webhook_worker(queue_name="webhook:12345")
 
         assert mock_create_task.call_count == concurrency
@@ -55,8 +65,9 @@ class TestWebhookConsumerConcurrency:
         concurrency = 2
         with patch(
             "kodiak.queue.conf.WEBHOOK_CONSUMER_CONCURRENCY", concurrency
-        ), patch("kodiak.queue.asyncio.create_task") as mock_create_task:
-            mock_create_task.return_value = _FakeTask()
+        ), patch(
+            "kodiak.queue.asyncio.create_task", side_effect=_fake_create_task
+        ) as mock_create_task:
             queue.start_webhook_worker(queue_name="webhook:12345")
             first_call_count = mock_create_task.call_count
 
@@ -73,13 +84,12 @@ class TestWebhookConsumerConcurrency:
         concurrency = 3
         with patch(
             "kodiak.queue.conf.WEBHOOK_CONSUMER_CONCURRENCY", concurrency
-        ), patch("kodiak.queue.asyncio.create_task") as mock_create_task:
-            mock_create_task.return_value = _FakeTask()
+        ), patch("kodiak.queue.asyncio.create_task", side_effect=_fake_create_task):
             queue.start_webhook_worker(queue_name="webhook:99999")
 
         tasks = list(queue.all_tasks())
         assert len(tasks) == concurrency
-        for meta, task in tasks:
+        for meta, _task in tasks:
             assert meta.kind == "webhook"
             assert meta.queue_name == "webhook:99999"
 
@@ -88,11 +98,8 @@ class TestWebhookConsumerConcurrency:
         Repo workers should still use the raw queue name as key (no :worker:N).
         """
         queue = RedisWebhookQueue()
-        with patch("kodiak.queue.asyncio.create_task") as mock_create_task:
-            mock_create_task.return_value = _FakeTask()
-            queue.start_repo_worker(
-                queue_name="merge_queue:12345.owner/repo/main"
-            )
+        with patch("kodiak.queue.asyncio.create_task", side_effect=_fake_create_task):
+            queue.start_repo_worker(queue_name="merge_queue:12345.owner/repo/main")
 
         assert "merge_queue:12345.owner/repo/main" in queue.worker_tasks
         tasks = list(queue.all_tasks())
