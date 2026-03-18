@@ -670,7 +670,7 @@ async def mergeable(
         *,
         details: Optional[Mapping[str, object]] = None,
     ) -> None:
-        decision_details = {"reason": reason}
+        decision_details: dict[str, object] = {"reason": reason}
         if details is not None:
             decision_details.update(details)
         await api.record_debug_event(

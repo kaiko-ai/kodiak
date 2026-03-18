@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from typing import AsyncGenerator
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -34,7 +35,7 @@ def _get_token() -> str:
     return _debug_token
 
 
-async def _empty_scan_iter() -> bytes:
+async def _empty_scan_iter() -> AsyncGenerator[bytes, None]:
     if False:
         yield b""
 
@@ -227,7 +228,7 @@ def test_debug_queues_json_shows_queue_previews_and_timelines(
         '"details": {"reason": "queued_for_merge"}}'
     )
 
-    async def scan_iter(*_: object, **__: object) -> bytes:
+    async def scan_iter(*_: object, **__: object) -> AsyncGenerator[bytes, None]:
         yield b"merge_queue_by_install:117046149"
 
     async def smembers_side_effect(key: str) -> set[bytes]:

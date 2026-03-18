@@ -130,7 +130,7 @@ def _queue_member_from_webhook_event(
         "pr_number": event.pull_request_number,
         "target_branch": event.target_name,
         "installation_id": event.installation_id,
-        "head_sha": event.head_sha,
+        "head_sha": getattr(event, "head_sha", None),
         "enqueued_at": score,
         "enqueued_at_iso": _format_ts(score),
         "age_sec": _format_age_seconds(score, now=now),
@@ -167,7 +167,8 @@ def _queue_member_from_raw_webhook(
 
 def _parse_debug_event(raw: bytes | str) -> dict[str, Any] | None:
     try:
-        return json.loads(_decode_redis_value(raw))
+        result: dict[str, Any] = json.loads(_decode_redis_value(raw))
+        return result
     except json.JSONDecodeError:
         return None
 
@@ -455,7 +456,9 @@ def _group_pr_timelines(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     timelines = []
     for group in grouped.values():
-        group_events = sorted(group["events"], key=lambda item: item.get("ts", 0))
+        group_events = sorted(
+            group["events"], key=lambda item: float(item.get("ts", 0))
+        )
         latest_event = group_events[-1]
         latest_status = next(
             (
@@ -511,7 +514,9 @@ def _group_webhook_timelines(events: list[dict[str, Any]]) -> list[dict[str, Any
 
     timelines = []
     for group in grouped.values():
-        group_events = sorted(group["events"], key=lambda item: item.get("ts", 0))
+        group_events = sorted(
+            group["events"], key=lambda item: float(item.get("ts", 0))
+        )
         latest_event = group_events[-1]
         fanout_count = next(
             (
