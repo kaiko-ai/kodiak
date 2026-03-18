@@ -20,6 +20,7 @@ from kodiak import (
     app_config as conf,
     queries,
 )
+from kodiak.debug_history import record_debug_event, summarize_webhook_payload
 from kodiak.events import (
     CheckRunEvent,
     PullRequestEvent,
@@ -38,6 +39,7 @@ logger = structlog.get_logger()
 
 INGEST_QUEUE_NAMES = "kodiak_ingest_queue_names"
 MERGE_QUEUE_NAMES = "kodiak_merge_queue_names:v2"
+MERGE_QUEUE_BY_INSTALL_PREFIX = "merge_queue_by_install:"
 WEBHOOK_QUEUE_NAMES = "kodiak_webhook_queue_names"
 QUEUE_PUBSUB_INGEST = "kodiak:pubsub:ingest"
 
@@ -65,6 +67,24 @@ def installation_id_from_queue(queue_name: str) -> str:
     return queue_name.partition(":")[2].partition(".")[0]
 
 
+def _decode_redis_text(value: bytes | str) -> str:
+    return value.decode() if isinstance(value, bytes) else value
+
+
+async def get_registered_merge_queue_names() -> set[str]:
+    queue_names_raw = await redis_bot.smembers(MERGE_QUEUE_NAMES)
+    queue_names = {_decode_redis_text(name) for name in queue_names_raw}
+
+    async for registry_key_raw in redis_bot.scan_iter(
+        match=f"{MERGE_QUEUE_BY_INSTALL_PREFIX}*"
+    ):
+        registry_key = _decode_redis_text(registry_key_raw)
+        members_raw = await redis_bot.smembers(registry_key)
+        queue_names.update(_decode_redis_text(name) for name in members_raw)
+
+    return queue_names
+
+
 class WebhookQueueProtocol(Protocol):
     async def enqueue(self, *, event: WebhookEvent) -> None: ...
 
@@ -73,39 +93,43 @@ class WebhookQueueProtocol(Protocol):
     ) -> int | None: ...
 
 
-async def pr_event(queue: WebhookQueueProtocol, pr: PullRequestEvent) -> None:
+async def pr_event(pr: PullRequestEvent) -> list[WebhookEvent]:
     """
     Trigger evaluation of modified PR.
     """
-    await queue.enqueue(
-        event=WebhookEvent(
+    return [
+        WebhookEvent(
             repo_owner=pr.repository.owner.login,
             repo_name=pr.repository.name,
             pull_request_number=pr.number,
             target_name=pr.pull_request.base.ref,
             installation_id=str(pr.installation.id),
         )
-    )
+    ]
 
 
-def check_run(check_run_event: CheckRunEvent) -> Iterator[WebhookEvent]:
+def check_run(check_run_event: CheckRunEvent) -> list[WebhookEvent]:
     """
     Trigger evaluation of all PRs included in check run.
     """
     # Prevent an infinite loop when we update our check run
     if check_run_event.check_run.name == queries.CHECK_RUN_NAME:
-        return
+        return []
+    events = []
     for pr in check_run_event.check_run.pull_requests:
         # filter out pull requests for other repositories
         if pr.base.repo.id != check_run_event.repository.id:
             continue
-        yield WebhookEvent(
-            repo_owner=check_run_event.repository.owner.login,
-            repo_name=check_run_event.repository.name,
-            pull_request_number=pr.number,
-            target_name=pr.base.ref,
-            installation_id=str(check_run_event.installation.id),
+        events.append(
+            WebhookEvent(
+                repo_owner=check_run_event.repository.owner.login,
+                repo_name=check_run_event.repository.name,
+                pull_request_number=pr.number,
+                target_name=pr.base.ref,
+                installation_id=str(check_run_event.installation.id),
+            )
         )
+    return events
 
 
 def find_branch_names_latest(sha: str, branches: list[Branch]) -> list[str]:
@@ -122,7 +146,7 @@ def find_branch_names_latest(sha: str, branches: list[Branch]) -> list[str]:
     return [branch.name for branch in branches if branch.commit.sha == sha]
 
 
-async def status_event(queue: WebhookQueueProtocol, status_event: StatusEvent) -> None:
+async def status_event(status_event: StatusEvent) -> list[WebhookEvent]:
     """
     Trigger evaluation of all PRs associated with the status event commit SHA.
     """
@@ -183,16 +207,17 @@ async def status_event(queue: WebhookQueueProtocol, status_event: StatusEvent) -
                 cap=MAX_BULK_ENQUEUE,
             )
 
+        queued_events = []
         for enqueued, event in enumerate(all_events):
             if fork_path and enqueued >= MAX_BULK_ENQUEUE:
                 break
-            await queue.enqueue(event=event)
+            queued_events.append(event)
+        return queued_events
 
 
 async def pr_review(
-    queue: WebhookQueueProtocol,
     review: PullRequestReviewEvent | PullRequestReviewThreadEvent,
-) -> None:
+) -> list[WebhookEvent]:
     """
     Trigger evaluation of the modified PR.
     """
@@ -205,16 +230,16 @@ async def pr_review(
         and review.review.user is not None
         and review.review.user.login == conf.GITHUB_APP_NAME + "[bot]"
     ):
-        return
-    await queue.enqueue(
-        event=WebhookEvent(
+        return []
+    return [
+        WebhookEvent(
             repo_owner=review.repository.owner.login,
             repo_name=review.repository.name,
             pull_request_number=review.pull_request.number,
             target_name=review.pull_request.base.ref,
             installation_id=str(review.installation.id),
         )
-    )
+    ]
 
 
 def get_branch_name(raw_ref: str) -> str | None:
@@ -226,7 +251,7 @@ def get_branch_name(raw_ref: str) -> str | None:
     return None
 
 
-async def push(queue: WebhookQueueProtocol, push_event: PushEvent) -> None:
+async def push(push_event: PushEvent) -> list[WebhookEvent]:
     """
     Trigger evaluation of PRs that depend on the pushed branch.
     """
@@ -237,7 +262,7 @@ async def push(queue: WebhookQueueProtocol, push_event: PushEvent) -> None:
     log = logger.bind(ref=push_event.ref, branch_name=branch_name)
     if branch_name is None:
         log.info("could not extract branch name from ref")
-        return
+        return []
     async with Client(
         owner=owner, repo=repo, installation_id=installation_id
     ) as api_client:
@@ -247,10 +272,11 @@ async def push(queue: WebhookQueueProtocol, push_event: PushEvent) -> None:
         prs = await api_client.get_open_pull_requests(base=branch_name)
         if prs is None:
             log.info("api call to find pull requests failed")
-            return
+            return []
+        events = []
         for pr in prs:
-            await queue.enqueue(
-                event=WebhookEvent(
+            events.append(
+                WebhookEvent(
                     repo_owner=owner,
                     repo_name=repo,
                     pull_request_number=pr.number,
@@ -258,6 +284,7 @@ async def push(queue: WebhookQueueProtocol, push_event: PushEvent) -> None:
                     installation_id=installation_id,
                 )
             )
+        return events
 
 
 def compress_payload(data: dict[str, object]) -> bytes:
@@ -266,10 +293,42 @@ def compress_payload(data: dict[str, object]) -> bytes:
 
 
 async def handle_webhook_event(
-    queue: WebhookQueueProtocol, event_name: str, payload: dict[str, object]
+    queue: WebhookQueueProtocol,
+    event_name: str,
+    payload: dict[str, object],
+    delivery_id: str | None = None,
 ) -> None:
-    log = logger.bind(event_name=event_name)
+    webhook_summary = summarize_webhook_payload(event_name=event_name, payload=payload)
+    installation_id = webhook_summary.get("installation_id")
+    owner = webhook_summary.get("owner")
+    repo = webhook_summary.get("repo")
+    pr_number = webhook_summary.get("pull_request_number")
+    action = webhook_summary.get("action")
 
+    log = logger.bind(
+        event_name=event_name,
+        delivery_id=delivery_id,
+        install=installation_id,
+        owner=owner,
+        repo=repo,
+        number=pr_number,
+    )
+
+    await record_debug_event(
+        stage="fanout",
+        event_type="webhook_processing_started",
+        message="Started processing webhook",
+        installation_id=installation_id,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        delivery_id=delivery_id,
+        event_name=event_name,
+        action=action,
+        details=webhook_summary,
+    )
+
+    usage_reported = False
     if conf.USAGE_REPORTING and event_name in conf.USAGE_REPORTING_EVENTS:
         # store events in Redis for dequeue by web api job.
         #
@@ -283,24 +342,71 @@ async def handle_webhook_event(
             b"kodiak:webhook_event", 0, conf.USAGE_REPORTING_QUEUE_LENGTH
         )
         log = log.bind(usage_reported=True)
+        usage_reported = True
+        await record_debug_event(
+            stage="fanout",
+            event_type="usage_reporting_enqueued",
+            message="Stored webhook for usage reporting",
+            installation_id=installation_id,
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            delivery_id=delivery_id,
+            event_name=event_name,
+            action=action,
+        )
 
+    generated_events: list[WebhookEvent] = []
+    event_parsed = True
     if event_name == "check_run":
-        for event in check_run(CheckRunEvent.parse_obj(payload)):
-            await queue.enqueue(event=event)
+        generated_events = check_run(CheckRunEvent.parse_obj(payload))
     elif event_name == "pull_request":
-        await pr_event(queue, PullRequestEvent.parse_obj(payload))
+        generated_events = await pr_event(PullRequestEvent.parse_obj(payload))
     elif event_name == "pull_request_review":
-        await pr_review(queue, PullRequestReviewEvent.parse_obj(payload))
+        generated_events = await pr_review(PullRequestReviewEvent.parse_obj(payload))
     elif event_name == "pull_request_review_thread":
-        await pr_review(queue, PullRequestReviewThreadEvent.parse_obj(payload))
+        generated_events = await pr_review(
+            PullRequestReviewThreadEvent.parse_obj(payload)
+        )
     elif event_name == "push":
-        await push(queue, PushEvent.parse_obj(payload))
+        generated_events = await push(PushEvent.parse_obj(payload))
     elif event_name == "status":
-        await status_event(queue, StatusEvent.parse_obj(payload))
+        generated_events = await status_event(StatusEvent.parse_obj(payload))
     else:
         log = log.bind(event_parsed=False)
+        event_parsed = False
 
-    log.info("webhook_event_handled")
+    for event in generated_events:
+        await queue.enqueue(event=event)
+
+    await record_debug_event(
+        stage="fanout",
+        event_type="webhook_processed",
+        message="Finished processing webhook",
+        installation_id=installation_id,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        delivery_id=delivery_id,
+        event_name=event_name,
+        action=action,
+        details={
+            "event_parsed": event_parsed,
+            "fanout_count": len(generated_events),
+            "generated_pr_events": [
+                {
+                    "owner": event.repo_owner,
+                    "repo": event.repo_name,
+                    "pr_number": event.pull_request_number,
+                    "target_branch": event.target_name,
+                }
+                for event in generated_events
+            ],
+            "usage_reported": usage_reported,
+        },
+    )
+
+    log.info("webhook_event_handled", fanout_count=len(generated_events))
 
 
 class WebhookEvent(BaseModel):
@@ -349,6 +455,21 @@ async def process_webhook_event(
         await redis_bot.get(webhook_event.get_merge_target_queue_name())
         == webhook_event.json().encode()
     )
+    await record_debug_event(
+        stage="evaluation_queue",
+        event_type="pr_evaluation_dequeued",
+        message="Dequeued PR evaluation event",
+        installation_id=webhook_event.installation_id,
+        owner=webhook_event.repo_owner,
+        repo=webhook_event.repo_name,
+        pr_number=webhook_event.pull_request_number,
+        queue_name=queue_name,
+        details={
+            "target_branch": webhook_event.target_name,
+            "score": webhook_event_json[2],
+            "is_active_merging": is_active_merging,
+        },
+    )
 
     # Skip the full evaluation cycle (GitHub API call + mergeable check +
     # redundant approve/queue) if this PR is already sitting in the merge
@@ -364,6 +485,21 @@ async def process_webhook_event(
             log.info(
                 "skip evaluation for already-enqueued PR",
                 number=webhook_event.pull_request_number,
+            )
+            await record_debug_event(
+                stage="evaluation",
+                event_type="pr_evaluation_skipped",
+                message="Skipped evaluation because PR is already in the merge queue",
+                installation_id=webhook_event.installation_id,
+                owner=webhook_event.repo_owner,
+                repo=webhook_event.repo_name,
+                pr_number=webhook_event.pull_request_number,
+                queue_name=queue_name,
+                details={
+                    "target_branch": webhook_event.target_name,
+                    "merge_queue_name": webhook_event.get_merge_queue_name(),
+                    "merge_queue_score": merge_queue_score,
+                },
             )
             return
 
@@ -381,6 +517,20 @@ async def process_webhook_event(
         return await webhook_queue.enqueue_for_repo(event=webhook_event, first=first)
 
     log.info("evaluate pr for webhook event")
+    await record_debug_event(
+        stage="evaluation",
+        event_type="pr_evaluation_started",
+        message="Started PR evaluation from webhook queue",
+        installation_id=webhook_event.installation_id,
+        owner=webhook_event.repo_owner,
+        repo=webhook_event.repo_name,
+        pr_number=webhook_event.pull_request_number,
+        queue_name=queue_name,
+        details={
+            "target_branch": webhook_event.target_name,
+            "is_active_merging": is_active_merging,
+        },
+    )
     await evaluate_pr(
         install=webhook_event.installation_id,
         owner=webhook_event.repo_owner,
@@ -392,6 +542,17 @@ async def process_webhook_event(
         queue_for_merge_callback=queue_for_merge,
         is_active_merging=is_active_merging,
         log=log,
+    )
+    await record_debug_event(
+        stage="evaluation",
+        event_type="pr_evaluation_finished",
+        message="Finished PR evaluation from webhook queue",
+        installation_id=webhook_event.installation_id,
+        owner=webhook_event.repo_owner,
+        repo=webhook_event.repo_name,
+        pr_number=webhook_event.pull_request_number,
+        queue_name=queue_name,
+        details={"target_branch": webhook_event.target_name},
     )
 
 
@@ -435,6 +596,21 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
     # mark this PR as being merged currently. we check this elsewhere to set proper status codes
     await redis_bot.set(target_name, webhook_event.json())
     await redis_bot.set(target_name + ":time", str(score))
+    await record_debug_event(
+        stage="merge_queue",
+        event_type="merge_started",
+        message="Started processing PR at the head of the merge queue",
+        installation_id=webhook_event.installation_id,
+        owner=webhook_event.repo_owner,
+        repo=webhook_event.repo_name,
+        pr_number=webhook_event.pull_request_number,
+        queue_name=queue_name,
+        details={
+            "target_branch": webhook_event.target_name,
+            "target_key": target_name,
+            "enqueued_at": score,
+        },
+    )
 
     async def dequeue() -> None:
         await redis_bot.zrem(webhook_event.get_merge_queue_name(), webhook_event.json())
@@ -465,6 +641,20 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
     log.info("merge completed, remove target marker", target_name=target_name)
     await redis_bot.delete(target_name)
     await redis_bot.delete(target_name + ":time")
+    await record_debug_event(
+        stage="merge_queue",
+        event_type="merge_finished",
+        message="Finished processing PR at the head of the merge queue",
+        installation_id=webhook_event.installation_id,
+        owner=webhook_event.repo_owner,
+        repo=webhook_event.repo_name,
+        pr_number=webhook_event.pull_request_number,
+        queue_name=queue_name,
+        details={
+            "target_branch": webhook_event.target_name,
+            "target_key": target_name,
+        },
+    )
 
 
 async def repo_queue_consumer(*, queue_name: str) -> typing.NoReturn:
@@ -515,12 +705,11 @@ class RedisWebhookQueue:
     async def create(self) -> None:
         # restart repo workers
         merge_queues, webhook_queues = await asyncio.gather(
-            redis_bot.smembers(MERGE_QUEUE_NAMES),
+            get_registered_merge_queue_names(),
             redis_bot.smembers(WEBHOOK_QUEUE_NAMES),
         )
         for merge_result in merge_queues:
-            queue_name = merge_result.decode()
-            self.start_repo_worker(queue_name=queue_name)
+            self.start_repo_worker(queue_name=merge_result)
 
         for webhook_result in webhook_queues:
             queue_name = webhook_result.decode()
@@ -581,6 +770,7 @@ class RedisWebhookQueue:
             pipe.zadd(queue_name, {event.json(): time.time()}, nx=True)
             pipe.zcard(queue_name)
             results = await pipe.execute()
+        inserted = bool(results[1]) if len(results) > 1 else None
         queue_depth = results[-1] if results else None
         log = logger.bind(
             owner=event.repo_owner,
@@ -588,7 +778,22 @@ class RedisWebhookQueue:
             number=event.pull_request_number,
             install=event.installation_id,
         )
-        log.info("enqueue webhook event", queue_depth=queue_depth)
+        log.info("enqueue webhook event", queue_depth=queue_depth, inserted=inserted)
+        await record_debug_event(
+            stage="evaluation_queue",
+            event_type="pr_evaluation_enqueued",
+            message="Queued PR for evaluation",
+            installation_id=event.installation_id,
+            owner=event.repo_owner,
+            repo=event.repo_name,
+            pr_number=event.pull_request_number,
+            queue_name=queue_name,
+            details={
+                "target_branch": event.target_name,
+                "queue_depth": queue_depth,
+                "inserted": inserted,
+            },
+        )
         self.start_webhook_worker(queue_name=queue_name)
 
     async def enqueue_for_repo(
@@ -605,7 +810,10 @@ class RedisWebhookQueue:
         """
         queue_name = get_merge_queue_name(event)
         async with redis_bot.pipeline(transaction=True) as pipe:
-            merge_queues_by_install = f"merge_queue_by_install:{event.installation_id}"
+            merge_queues_by_install = (
+                f"{MERGE_QUEUE_BY_INSTALL_PREFIX}{event.installation_id}"
+            )
+            pipe.sadd(MERGE_QUEUE_NAMES, queue_name)
             pipe.sadd(merge_queues_by_install, queue_name)
             pipe.expire(merge_queues_by_install, time=ONE_DAY)
             if first:
@@ -631,7 +839,26 @@ class RedisWebhookQueue:
         kvs = sorted(
             ((key, value) for key, value in zrange_results), key=lambda x: x[1]
         )
-        return find_position((key for key, value in kvs), event.json().encode())
+        position = find_position((key for key, value in kvs), event.json().encode())
+        inserted = bool(results[3]) if len(results) > 3 else None
+        await record_debug_event(
+            stage="merge_queue",
+            event_type="pr_added_to_merge_queue",
+            message="Queued PR for merge",
+            installation_id=event.installation_id,
+            owner=event.repo_owner,
+            repo=event.repo_name,
+            pr_number=event.pull_request_number,
+            queue_name=queue_name,
+            details={
+                "target_branch": event.target_name,
+                "queue_depth": len(zrange_results),
+                "inserted": inserted,
+                "position": position,
+                "priority": first,
+            },
+        )
+        return position
 
     def all_tasks(self) -> Iterator[tuple[TaskMeta, Task[NoReturn]]]:
         for worker_key, (task, task_kind) in self.worker_tasks.items():

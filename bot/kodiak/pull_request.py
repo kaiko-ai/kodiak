@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional, Type
+from typing import Any, Awaitable, Callable, Mapping, Optional, Type
 
 import structlog
 from typing_extensions import Protocol
 
 import kodiak.app_config as conf
+from kodiak.debug_history import record_debug_event as record_debug_history_event
 from kodiak.errors import (
     ApiCallException,
     GitHubApiInternalServerError,
@@ -79,6 +80,16 @@ async def evaluate_pr(
     cycle_count = 0
     start_time = time.monotonic()
     log = log.bind(owner=owner, repo=repo, number=number, merging=merging)
+    await record_debug_history_event(
+        stage="evaluation",
+        event_type="evaluation_loop_started",
+        message="Started PR evaluation loop",
+        installation_id=install,
+        owner=owner,
+        repo=repo,
+        pr_number=number,
+        details={"merging": merging, "is_active_merging": is_active_merging},
+    )
     while True:
         log.info("get_pr")
         try:
@@ -136,10 +147,37 @@ async def evaluate_pr(
                     duration_ms=duration_ms,
                     cycles=cycle_count,
                 )
+                await record_debug_history_event(
+                    stage="evaluation",
+                    event_type="evaluation_loop_completed",
+                    message="Completed PR evaluation loop",
+                    installation_id=install,
+                    owner=owner,
+                    repo=repo,
+                    pr_number=number,
+                    details={
+                        "duration_ms": duration_ms,
+                        "cycles": cycle_count,
+                        "merging": merging,
+                    },
+                )
             except RetryForSkippableChecks:
                 if skippable_check_timeout > 0:
                     skippable_check_timeout -= 1
                     log.info("waiting for skippable checks to pass")
+                    await record_debug_history_event(
+                        stage="evaluation",
+                        event_type="evaluation_retry_skippable_checks",
+                        message="Retrying while waiting for skippable checks",
+                        installation_id=install,
+                        owner=owner,
+                        repo=repo,
+                        pr_number=number,
+                        details={
+                            "remaining_retries": skippable_check_timeout,
+                            "retry_rate_seconds": RETRY_RATE_SECONDS,
+                        },
+                    )
                     await asyncio.sleep(RETRY_RATE_SECONDS)
                     continue
             except PollForever:
@@ -152,6 +190,20 @@ async def evaluate_pr(
                     cycle=cycle_count,
                     elapsed_ms=elapsed_ms,
                 )
+                await record_debug_history_event(
+                    stage="evaluation",
+                    event_type="evaluation_polling",
+                    message="Polling PR for a mergeability change",
+                    installation_id=install,
+                    owner=owner,
+                    repo=repo,
+                    pr_number=number,
+                    details={
+                        "cycle": cycle_count,
+                        "elapsed_ms": elapsed_ms,
+                        "merging": merging,
+                    },
+                )
                 if (
                     merging
                     and (time.monotonic() - poll_start_time)
@@ -161,6 +213,19 @@ async def evaluate_pr(
                         "merge_queue_poll_timeout",
                         elapsed_sec=int(time.monotonic() - poll_start_time),
                         cycles=cycle_count,
+                    )
+                    await record_debug_history_event(
+                        stage="evaluation",
+                        event_type="merge_queue_poll_timeout",
+                        message="Polling timed out; moving PR out of the merge slot",
+                        installation_id=install,
+                        owner=owner,
+                        repo=repo,
+                        pr_number=number,
+                        details={
+                            "elapsed_sec": int(time.monotonic() - poll_start_time),
+                            "cycles": cycle_count,
+                        },
                     )
                     await dequeue_callback()
                     await requeue_callback()
@@ -180,12 +245,45 @@ async def evaluate_pr(
                     )
                     api_call_retries_remaining -= 1
                     log.info("problem contacting remote api. retrying")
+                    await record_debug_history_event(
+                        stage="evaluation",
+                        event_type="evaluation_api_retry",
+                        message="Retrying after a GitHub API problem",
+                        installation_id=install,
+                        owner=owner,
+                        repo=repo,
+                        pr_number=number,
+                        details={
+                            "method": e.method,
+                            "status_code": e.status_code,
+                            "retries_remaining": api_call_retries_remaining,
+                        },
+                    )
                     continue
                 log.warning("api_call_retries_remaining", exc_info=True)
+                await record_debug_history_event(
+                    stage="evaluation",
+                    event_type="evaluation_api_retry_exhausted",
+                    message="Exhausted PR evaluation API retries",
+                    installation_id=install,
+                    owner=owner,
+                    repo=repo,
+                    pr_number=number,
+                    details={"method": e.method, "status_code": e.status_code},
+                )
             return
         except asyncio.TimeoutError:
             # On timeout we add the PR to the back of the queue to try again.
             log.warning("mergeable_timeout", exc_info=True)
+            await record_debug_history_event(
+                stage="evaluation",
+                event_type="evaluation_timeout",
+                message="PR evaluation timed out and will be requeued",
+                installation_id=install,
+                owner=owner,
+                repo=repo,
+                pr_number=number,
+            )
             await requeue_callback()
 
 
@@ -226,12 +324,41 @@ class PRV2:
         self.client = client or Client
         self._last_status_message: str | None = None
 
+    async def record_debug_event(
+        self,
+        *,
+        stage: str,
+        event_type: str,
+        message: str,
+        details: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        await record_debug_history_event(
+            stage=stage,
+            event_type=event_type,
+            message=message,
+            installation_id=self.install,
+            owner=self.owner,
+            repo=self.repo,
+            pr_number=self.number,
+            details=details,
+        )
+
     async def dequeue(self) -> None:
         self.log.info("dequeue")
+        await self.record_debug_event(
+            stage="pr_action",
+            event_type="pr_dequeued",
+            message="Removed PR from the merge queue",
+        )
         await self.dequeue_callback()
 
     async def requeue(self) -> None:
         self.log.info("requeue")
+        await self.record_debug_event(
+            stage="pr_action",
+            event_type="pr_requeued",
+            message="Requeued PR for another evaluation pass",
+        )
         await self.requeue_callback()
 
     async def set_status(
@@ -246,6 +373,12 @@ class PRV2:
         """
         if msg == self._last_status_message:
             self.log.info("set_status_skipped_duplicate", message=msg)
+            await self.record_debug_event(
+                stage="status",
+                event_type="status_skipped_duplicate",
+                message="Skipped duplicate status update",
+                details={"status": msg},
+            )
             return
         self.log.info("set_status", message=msg, markdown_content=markdown_content)
         async with self.client(
@@ -262,8 +395,23 @@ class PRV2:
                 self.log.warning(
                     "failed to create notification", res=res, exc_info=True
                 )
+                await self.record_debug_event(
+                    stage="status",
+                    event_type="status_failed",
+                    message="Failed to publish a status update",
+                    details={"status": msg},
+                )
             else:
                 self._last_status_message = msg
+                await self.record_debug_event(
+                    stage="status",
+                    event_type="status_set",
+                    message="Published a status update",
+                    details={
+                        "status": msg,
+                        "markdown_content": markdown_content,
+                    },
+                )
 
     async def pull_requests_for_ref(self, ref: str) -> Optional[int]:
         log = self.log.bind(ref=ref)
@@ -280,6 +428,12 @@ class PRV2:
 
     async def delete_branch(self, branch_name: str) -> None:
         self.log.info("delete_branch", branch_name=branch_name)
+        await self.record_debug_event(
+            stage="github_action",
+            event_type="delete_branch_started",
+            message="Attempting to delete the branch after merge",
+            details={"branch_name": branch_name},
+        )
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
         ) as api_client:
@@ -289,11 +443,38 @@ class PRV2:
             except HTTPError as e:
                 if e.response is not None and e.response.status_code == 422:
                     self.log.info("branch already deleted, nothing to do", res=res)
+                    await self.record_debug_event(
+                        stage="github_action",
+                        event_type="delete_branch_already_deleted",
+                        message="Branch was already deleted",
+                        details={"branch_name": branch_name},
+                    )
                 else:
                     self.log.warning("failed to delete branch", res=res, exc_info=True)
+                    await self.record_debug_event(
+                        stage="github_action",
+                        event_type="delete_branch_failed",
+                        message="Failed to delete the branch",
+                        details={
+                            "branch_name": branch_name,
+                            "status_code": res.status_code,
+                        },
+                    )
+            else:
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="delete_branch_succeeded",
+                    message="Deleted the branch",
+                    details={"branch_name": branch_name},
+                )
 
     async def update_branch(self) -> None:
         self.log.info("update_branch")
+        await self.record_debug_event(
+            stage="github_action",
+            event_type="update_branch_started",
+            message="Attempting to update the PR branch",
+        )
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
         ) as api_client:
@@ -302,15 +483,32 @@ class PRV2:
                 res.raise_for_status()
             except HTTPError as e:
                 self.log.warning("failed to update branch", res=res, exc_info=True)
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="update_branch_failed",
+                    message="Failed to update the PR branch",
+                    details={"status_code": res.status_code},
+                )
                 # we raise an exception to retry this request.
                 raise ApiCallException(
                     method="pull_request/update_branch",
                     http_status_code=res.status_code,
                     response=res.content,
                 ) from e
+            else:
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="update_branch_succeeded",
+                    message="Updated the PR branch",
+                )
 
     async def approve_pull_request(self) -> None:
         self.log.info("approve_pull_request")
+        await self.record_debug_event(
+            stage="github_action",
+            event_type="approve_pull_request_started",
+            message="Attempting to approve the PR",
+        )
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
         ) as api_client:
@@ -321,9 +519,26 @@ class PRV2:
                 self.log.warning(
                     "failed to approve pull request", res=res, exc_info=True
                 )
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="approve_pull_request_failed",
+                    message="Failed to approve the PR",
+                    details={"status_code": res.status_code},
+                )
+            else:
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="approve_pull_request_succeeded",
+                    message="Approved the PR",
+                )
 
     async def trigger_test_commit(self) -> None:
         self.log.info("trigger_test_commit")
+        await self.record_debug_event(
+            stage="github_action",
+            event_type="trigger_test_commit_started",
+            message="Attempting to trigger a mergeability recalculation",
+        )
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
         ) as api_client:
@@ -336,6 +551,18 @@ class PRV2:
                     res=res,
                     exc_info=True,
                 )
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="trigger_test_commit_failed",
+                    message="Failed to trigger a mergeability recalculation",
+                    details={"status_code": res.status_code},
+                )
+            else:
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="trigger_test_commit_succeeded",
+                    message="Triggered a mergeability recalculation",
+                )
 
     async def merge(
         self,
@@ -344,6 +571,15 @@ class PRV2:
         commit_message: Optional[str],
     ) -> None:
         self.log.info("merge", method=merge_method)
+        await self.record_debug_event(
+            stage="github_action",
+            event_type="merge_started",
+            message="Attempting to merge the PR",
+            details={
+                "merge_method": merge_method,
+                "commit_title": commit_title,
+            },
+        )
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
         ) as api_client:
@@ -364,6 +600,15 @@ class PRV2:
                     self.log.warning(
                         "failed to merge pull request", res=res, exc_info=True
                     )
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="merge_failed",
+                    message="Failed to merge the PR",
+                    details={
+                        "merge_method": merge_method,
+                        "status_code": res.status_code,
+                    },
+                )
                 if e.response is not None and e.response.status_code == 500:
                     raise GitHubApiInternalServerError from e
                 # we raise an exception to retry this request.
@@ -372,9 +617,22 @@ class PRV2:
                     http_status_code=res.status_code,
                     response=res.content,
                 ) from e
+            else:
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="merge_succeeded",
+                    message="Merged the PR",
+                    details={"merge_method": merge_method},
+                )
 
     async def update_ref(self, ref: str, sha: str) -> None:
         self.log.info("update_ref", ref=ref, sha=sha)
+        await self.record_debug_event(
+            stage="github_action",
+            event_type="update_ref_started",
+            message="Attempting a fast-forward ref update",
+            details={"ref": ref, "sha": sha},
+        )
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
         ) as api_client:
@@ -386,22 +644,52 @@ class PRV2:
                     self.log.info("fast forward update not possible.", res=res)
                 else:
                     self.log.warning("failed to update ref", res=res, exc_info=True)
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="update_ref_failed",
+                    message="Failed to fast-forward the base ref",
+                    details={
+                        "ref": ref,
+                        "sha": sha,
+                        "status_code": res.status_code,
+                    },
+                )
                 # we raise an exception to retry this request.
                 raise ApiCallException(
                     method="pull_request/update_ref",
                     http_status_code=res.status_code,
                     response=res.content,
                 ) from e
+            else:
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="update_ref_succeeded",
+                    message="Fast-forwarded the base ref",
+                    details={"ref": ref, "sha": sha},
+                )
 
     async def queue_for_merge(self, *, first: bool) -> Optional[int]:
         self.log.info("queue_for_merge")
-        return await self.queue_for_merge_callback(first=first)
+        position = await self.queue_for_merge_callback(first=first)
+        await self.record_debug_event(
+            stage="pr_action",
+            event_type="queue_for_merge_requested",
+            message="Requested that the PR be added to the merge queue",
+            details={"first": first, "position": position},
+        )
+        return position
 
     async def add_label(self, label: str) -> None:
         """
         add label to pull request
         """
         self.log.info("add_label", label=label)
+        await self.record_debug_event(
+            stage="github_action",
+            event_type="add_label_started",
+            message="Attempting to add a label",
+            details={"label": label},
+        )
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
         ) as api_client:
@@ -412,17 +700,36 @@ class PRV2:
                 self.log.warning(
                     "failed to add label", label=label, res=res, exc_info=True
                 )
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="add_label_failed",
+                    message="Failed to add a label",
+                    details={"label": label, "status_code": res.status_code},
+                )
                 raise ApiCallException(
                     method="pull_request/add_label",
                     http_status_code=res.status_code,
                     response=res.content,
                 ) from exc
+            else:
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="add_label_succeeded",
+                    message="Added a label",
+                    details={"label": label},
+                )
 
     async def remove_label(self, label: str) -> None:
         """
         remove the PR label specified by `label_id` for a given `pr_number`
         """
         self.log.info("remove_label", label=label)
+        await self.record_debug_event(
+            stage="github_action",
+            event_type="remove_label_started",
+            message="Attempting to remove a label",
+            details={"label": label},
+        )
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
         ) as api_client:
@@ -433,18 +740,37 @@ class PRV2:
                 self.log.warning(
                     "failed to delete label", label=label, res=res, exc_info=True
                 )
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="remove_label_failed",
+                    message="Failed to remove a label",
+                    details={"label": label, "status_code": res.status_code},
+                )
                 # we raise an exception to retry this request.
                 raise ApiCallException(
                     method="pull_request/delete_label",
                     http_status_code=res.status_code,
                     response=res.content,
                 ) from exc
+            else:
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="remove_label_succeeded",
+                    message="Removed a label",
+                    details={"label": label},
+                )
 
     async def create_comment(self, body: str) -> None:
         """
         create a comment on the specified `pr_number` with the given `body` as text.
         """
         self.log.info("create_comment", body=body)
+        await self.record_debug_event(
+            stage="github_action",
+            event_type="create_comment_started",
+            message="Attempting to create a PR comment",
+            details={"body": body},
+        )
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
         ) as api_client:
@@ -453,3 +779,16 @@ class PRV2:
                 res.raise_for_status()
             except HTTPError:
                 self.log.warning("failed to create comment", res=res, exc_info=True)
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="create_comment_failed",
+                    message="Failed to create a PR comment",
+                    details={"status_code": res.status_code},
+                )
+            else:
+                await self.record_debug_event(
+                    stage="github_action",
+                    event_type="create_comment_succeeded",
+                    message="Created a PR comment",
+                    details={"body": body},
+                )

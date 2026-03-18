@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from kodiak import app_config as conf
+from kodiak.debug_history import record_debug_event, summarize_webhook_payload
 from kodiak.entrypoints.debug import (
     debug_index,
     debug_queues_html,
@@ -89,9 +90,29 @@ async def github_webhook_event(request: Request) -> Response:
             detail="Invalid signature: X-Hub-Signature",
         )
     event: dict[str, Any] = await request.json()
+    delivery_id = request.headers.get("X-GitHub-Delivery")
 
     log = logger.bind(event_name=github_event, event=event)
     installation_id: int | None = event.get("installation", {}).get("id")
+    webhook_summary = summarize_webhook_payload(event_name=github_event, payload=event)
+    owner = webhook_summary.get("owner")
+    repo = webhook_summary.get("repo")
+    pr_number = webhook_summary.get("pull_request_number")
+    action = webhook_summary.get("action")
+
+    await record_debug_event(
+        stage="ingest",
+        event_type="webhook_received",
+        message="Received GitHub webhook",
+        installation_id=str(installation_id) if installation_id is not None else None,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        delivery_id=delivery_id,
+        event_name=github_event,
+        action=action,
+        details=webhook_summary,
+    )
 
     if github_event in {
         "github_app_authorization",
@@ -99,21 +120,56 @@ async def github_webhook_event(request: Request) -> Response:
         "installation_repositories",
     }:
         log.info("administrative_event_received")
+        await record_debug_event(
+            stage="ingest",
+            event_type="webhook_ignored",
+            message="Ignored administrative webhook",
+            delivery_id=delivery_id,
+            event_name=github_event,
+            action=action,
+        )
         return JSONResponse({"ok": True})
 
     if installation_id is None:
         log.warning("unexpected_event_skipped")
+        await record_debug_event(
+            stage="ingest",
+            event_type="webhook_skipped_missing_installation",
+            message="Skipped webhook because installation id is missing",
+            delivery_id=delivery_id,
+            event_name=github_event,
+            action=action,
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+        )
         return JSONResponse({"ok": True})
 
     if github_event not in HANDLED_EVENT_TYPES:
         log.info("unhandled_event_filtered", event_name=github_event)
+        await record_debug_event(
+            stage="ingest",
+            event_type="webhook_filtered",
+            message="Filtered webhook because Kodiak does not handle this event type",
+            installation_id=str(installation_id),
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            delivery_id=delivery_id,
+            event_name=github_event,
+            action=action,
+        )
         return JSONResponse({"ok": True})
 
     ingest_queue = get_ingest_queue(installation_id)
 
-    await redis_bot.rpush(
+    ingest_queue_length = await redis_bot.rpush(
         ingest_queue,
-        RawWebhookEvent(event_name=github_event, payload=event).json(),
+        RawWebhookEvent(
+            event_name=github_event,
+            payload=event,
+            delivery_id=delivery_id,
+        ).json(),
     )
 
     await redis_bot.ltrim(ingest_queue, 0, conf.INGEST_QUEUE_LENGTH)
@@ -121,6 +177,20 @@ async def github_webhook_event(request: Request) -> Response:
     await redis_bot.publish(
         QUEUE_PUBSUB_INGEST,
         PubsubIngestQueueSchema(installation_id=installation_id).json(),
+    )
+    await record_debug_event(
+        stage="ingest",
+        event_type="webhook_enqueued_for_ingest",
+        message="Queued raw webhook for ingest workers",
+        installation_id=str(installation_id),
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        queue_name=ingest_queue,
+        delivery_id=delivery_id,
+        event_name=github_event,
+        action=action,
+        details={"ingest_queue_length": ingest_queue_length},
     )
     return JSONResponse({"ok": True})
 
