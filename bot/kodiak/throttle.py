@@ -76,7 +76,11 @@ class Throttler:
         try:
             key = self._redis_key()
             # hourly rate limit
-            hourly_limit = int(self.rate_limit * 3600 / self.period) if self.period != 3600 else int(self.rate_limit)
+            hourly_limit = (
+                int(self.rate_limit * 3600 / self.period)
+                if self.period != 3600
+                else int(self.rate_limit)
+            )
             count = await self._redis.incr(key)
             if count == 1:
                 # First request in this bucket — set TTL

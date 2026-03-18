@@ -2466,9 +2466,7 @@ async def test_unknown_mergeability_no_automerge_label_skips_trigger() -> None:
         "should not waste an API call on trigger_test_commit for ineligible PRs"
     )
     assert api.requeue.call_count == 0
-    assert api.dequeue.call_count == 1, (
-        "should dequeue because no automerge label"
-    )
+    assert api.dequeue.call_count == 1, "should dequeue because no automerge label"
 
 
 async def test_unknown_mergeability_no_require_label_triggers() -> None:

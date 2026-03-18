@@ -931,7 +931,9 @@ _api_features_cache: ApiFeatures | None = None
 # Cache for get_config_for_ref() results. Config rarely changes during a merge,
 # so caching avoids redundant GraphQL calls on every poll cycle.
 _CONFIG_CACHE_TTL_SEC = 60
-_config_cache: dict[tuple[str, str, str, str, str | None], tuple[float, CfgInfo | None]] = {}
+_config_cache: dict[
+    tuple[str, str, str, str, str | None], tuple[float, CfgInfo | None]
+] = {}
 
 
 def _get_cached_config(
@@ -1030,7 +1032,9 @@ class Client:
         )
         # Warn when approaching rate limits
         try:
-            remaining = int(rate_limit_remaining_str) if rate_limit_remaining_str else None
+            remaining = (
+                int(rate_limit_remaining_str) if rate_limit_remaining_str else None
+            )
         except (ValueError, TypeError):
             remaining = None
         if remaining is not None and remaining < 100:

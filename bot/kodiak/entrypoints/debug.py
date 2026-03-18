@@ -75,7 +75,11 @@ async def _collect_merge_queues() -> list[dict[str, Any]]:
             try:
                 merging_pr = json.loads(target_raw).get("pull_request_number")
             except (json.JSONDecodeError, AttributeError, TypeError):
-                merging_pr = target_raw.decode() if isinstance(target_raw, bytes) else str(target_raw)
+                merging_pr = (
+                    target_raw.decode()
+                    if isinstance(target_raw, bytes)
+                    else str(target_raw)
+                )
         if target_time_raw:
             try:
                 enqueue_time = float(target_time_raw)
@@ -95,7 +99,14 @@ async def _collect_merge_queues() -> list[dict[str, Any]]:
                     }
                 )
             except (json.JSONDecodeError, AttributeError, TypeError, KeyError):
-                pr_list.append({"raw": member.decode() if isinstance(member, bytes) else str(member), "enqueued_at": score})
+                pr_list.append(
+                    {
+                        "raw": member.decode()
+                        if isinstance(member, bytes)
+                        else str(member),
+                        "enqueued_at": score,
+                    }
+                )
 
         queues.append(
             {
@@ -169,13 +180,17 @@ def _render_html(data: dict[str, Any]) -> str:
     merge_rows = ""
     for q in data["merge_queues"]:
         pr_nums = ", ".join(str(p.get("number", "?")) for p in q["queued_prs"])
-        duration = f"{q['merge_duration_sec']}s" if q["merge_duration_sec"] is not None else "-"
+        duration = (
+            f"{q['merge_duration_sec']}s"
+            if q["merge_duration_sec"] is not None
+            else "-"
+        )
         merge_rows += f"""<tr>
-            <td>{q['repo']}</td>
-            <td>{q['size']}</td>
-            <td>{q['merging_pr'] or '-'}</td>
+            <td>{q["repo"]}</td>
+            <td>{q["size"]}</td>
+            <td>{q["merging_pr"] or "-"}</td>
             <td>{duration}</td>
-            <td>{pr_nums or '-'}</td>
+            <td>{pr_nums or "-"}</td>
         </tr>"""
 
     webhook_rows = ""
@@ -183,8 +198,8 @@ def _render_html(data: dict[str, Any]) -> str:
         oldest = f"{q['oldest_event_ts']:.1f}" if q["oldest_event_ts"] else "-"
         newest = f"{q['newest_event_ts']:.1f}" if q["newest_event_ts"] else "-"
         webhook_rows += f"""<tr>
-            <td>{q['name']}</td>
-            <td>{q['size']}</td>
+            <td>{q["name"]}</td>
+            <td>{q["size"]}</td>
             <td>{oldest}</td>
             <td>{newest}</td>
         </tr>"""
@@ -192,8 +207,8 @@ def _render_html(data: dict[str, Any]) -> str:
     ingest_rows = ""
     for q in data["ingest_queues"]:
         ingest_rows += f"""<tr>
-            <td>{q['name']}</td>
-            <td>{q['length']}</td>
+            <td>{q["name"]}</td>
+            <td>{q["length"]}</td>
         </tr>"""
 
     return f"""<!DOCTYPE html>
@@ -215,21 +230,21 @@ def _render_html(data: dict[str, Any]) -> str:
 </head>
 <body>
     <h1>Kodiak Queue Status</h1>
-    <p class="timestamp">Collected at: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(data['collected_at']))}</p>
+    <p class="timestamp">Collected at: {time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(data["collected_at"]))}</p>
 
-    <h2>Merge Queues ({len(data['merge_queues'])})</h2>
+    <h2>Merge Queues ({len(data["merge_queues"])})</h2>
     <table>
         <tr><th>Repo/Branch</th><th>Size</th><th>Merging PR</th><th>Duration</th><th>Queued PRs</th></tr>
         {merge_rows or '<tr><td colspan="5">No merge queues</td></tr>'}
     </table>
 
-    <h2>Webhook Queues ({len(data['webhook_queues'])})</h2>
+    <h2>Webhook Queues ({len(data["webhook_queues"])})</h2>
     <table>
         <tr><th>Queue</th><th>Size</th><th>Oldest Event</th><th>Newest Event</th></tr>
         {webhook_rows or '<tr><td colspan="4">No webhook queues</td></tr>'}
     </table>
 
-    <h2>Ingest Queues ({len(data['ingest_queues'])})</h2>
+    <h2>Ingest Queues ({len(data["ingest_queues"])})</h2>
     <table>
         <tr><th>Queue</th><th>Length</th></tr>
         {ingest_rows or '<tr><td colspan="2">No ingest queues</td></tr>'}
