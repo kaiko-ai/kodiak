@@ -27,12 +27,16 @@ logger = structlog.get_logger()
 _debug_token: str = ""
 
 
-def initialize_debug_token() -> None:
+def initialize_debug_token(*, _force: bool = False) -> None:
     """
     Initialize the debug token. Call once at module load in ingest.py.
     Uses DEBUG_TOKEN env var if set, otherwise generates a random token.
+    Idempotent — subsequent calls are no-ops so uvicorn's double-import
+    of the ingest module doesn't overwrite the token.
     """
     global _debug_token
+    if _debug_token and not _force:
+        return
     _debug_token = os.environ.get("DEBUG_TOKEN") or secrets.token_urlsafe(32)
     logger.info("debug_token_initialized", token=_debug_token)
 
