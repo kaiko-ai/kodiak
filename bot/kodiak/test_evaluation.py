@@ -169,10 +169,30 @@ class MockRequeue(BaseMockFunc):
         self.log_call(dict())
 
 
+class MockRecordDebugEvent(BaseMockFunc):
+    async def __call__(
+        self,
+        *,
+        stage: str,
+        event_type: str,
+        message: str,
+        details: Optional[Mapping[str, object]] = None,
+    ) -> None:
+        self.log_call(
+            dict(
+                stage=stage,
+                event_type=event_type,
+                message=message,
+                details=details,
+            )
+        )
+
+
 class MockPrApi:
     def __init__(self) -> None:
         self.dequeue = MockDequeue()
         self.requeue = MockRequeue()
+        self.record_debug_event = MockRecordDebugEvent()
         self.set_status = MockSetStatus()
         self.pull_requests_for_ref = MockPullRequestsForRef()
         self.delete_branch = MockDeleteBranch()

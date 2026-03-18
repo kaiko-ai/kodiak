@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from kodiak.queries import clear_config_cache
@@ -7,6 +9,14 @@ from kodiak.queries import clear_config_cache
 def _clear_caches() -> None:
     """Clear module-level caches between tests to prevent leakage."""
     clear_config_cache()
+
+
+@pytest.fixture(autouse=True)
+def _mock_debug_history_redis() -> None:  # type: ignore[misc]
+    """Prevent debug event recording from hitting a real Redis connection in tests."""
+    mock_redis = AsyncMock()
+    with patch("kodiak.debug_history.redis_bot", mock_redis):
+        yield
 
 
 @pytest.fixture(autouse=True)

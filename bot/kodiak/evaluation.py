@@ -4,7 +4,7 @@ import asyncio
 import textwrap
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Set, Union
+from typing import Dict, List, Mapping, Optional, Sequence, Set, Union
 
 import inflection
 import pydantic
@@ -291,6 +291,15 @@ class PRAPI(Protocol):
 
     async def requeue(self) -> None: ...
 
+    async def record_debug_event(
+        self,
+        *,
+        stage: str,
+        event_type: str,
+        message: str,
+        details: Optional[Mapping[str, object]] = None,
+    ) -> None: ...
+
     async def set_status(
         self, msg: str, *, markdown_content: Optional[str] = None
     ) -> None: ...
@@ -326,11 +335,23 @@ class PRAPI(Protocol):
 async def cfg_err(
     api: PRAPI, msg: str, *, markdown_content: Optional[str] = None
 ) -> None:
+    await api.record_debug_event(
+        stage="decision",
+        event_type="config_error",
+        message="Blocked PR because of a configuration problem",
+        details={"reason": msg, "markdown_content": markdown_content},
+    )
     await api.dequeue()
     await api.set_status(f"⚠️ config error ({msg})", markdown_content=markdown_content)
 
 
 async def block_merge(api: PRAPI, pull_request: PullRequest, msg: str) -> None:
+    await api.record_debug_event(
+        stage="decision",
+        event_type="merge_blocked",
+        message="Blocked PR from merging",
+        details={"reason": msg, "merge_state_status": pull_request.mergeStateStatus},
+    )
     await api.dequeue()
     await api.set_status(f"🛑 cannot merge ({msg})")
 
@@ -643,8 +664,30 @@ async def mergeable(
             return
         await api.set_status(msg, markdown_content=markdown_content)
 
+    async def record_decision(
+        reason: str,
+        message: str,
+        *,
+        details: Optional[Mapping[str, object]] = None,
+    ) -> None:
+        decision_details: dict[str, object] = {"reason": reason}
+        if details is not None:
+            decision_details.update(details)
+        await api.record_debug_event(
+            stage="decision",
+            event_type="merge_decision",
+            message=message,
+            details=decision_details,
+        )
+
     if not isinstance(config, V1):
         log.info("merge_decision", reason="config_error")
+        await api.record_debug_event(
+            stage="decision",
+            event_type="merge_decision",
+            message="Blocked PR because the repository configuration is invalid",
+            details={"reason": "config_error", "config_path": config_path},
+        )
         await set_status(
             '⚠️ Invalid configuration (Click "Details" for more info.)',
             markdown_content=get_markdown_for_config(
@@ -731,7 +774,43 @@ async def mergeable(
     # we keep the configuration errors before the rest of the application logic
     # so configuration issues are surfaced as early as possible.
 
+    await api.record_debug_event(
+        stage="evaluation",
+        event_type="pr_snapshot",
+        message="Captured PR state before evaluating mergeability",
+        details={
+            "merge_method": merge_method.value,
+            "mergeable": pull_request.mergeable,
+            "merge_state_status": pull_request.mergeStateStatus,
+            "review_decision": pull_request.reviewDecision,
+            "is_draft": pull_request.isDraft,
+            "labels": pull_request.labels,
+            "required_status_checks": sorted(
+                get_required_status_checks(branch_protection, ruleset_rules)
+            ),
+            "status_contexts": [
+                {"context": context.context, "state": context.state}
+                for context in contexts
+            ],
+            "check_runs": [
+                {
+                    "name": check_run.name,
+                    "status": getattr(check_run, "status", None),
+                    "conclusion": getattr(check_run, "conclusion", None),
+                }
+                for check_run in check_runs
+            ],
+            "merging": merging,
+            "is_active_merge": is_active_merge,
+        },
+    )
+
     if config.disable_bot_label in pull_request.labels:
+        await record_decision(
+            "disabled_by_label",
+            "Kodiak is disabled on this PR because the disable label is present",
+            details={"label": config.disable_bot_label},
+        )
         await api.dequeue()
         await api.set_status(
             f"🚨 kodiak disabled by disable_bot_label ({config.disable_bot_label}). Remove label to re-enable Kodiak."
@@ -804,6 +883,10 @@ async def mergeable(
             # webhook for the commit test.
             await api.requeue()
             log.info("merge_decision", reason="requeued_unknown_mergeability")
+            await record_decision(
+                "requeued_unknown_mergeability",
+                "Requeued PR because GitHub reported unknown mergeability",
+            )
 
             # we don't want to abort the merge if we encounter this status check.
             # Just keep polling!
@@ -903,6 +986,11 @@ async def mergeable(
         and not should_dependency_automerge
     ):
         log.info("merge_decision", reason="dequeued_no_automerge_label")
+        await record_decision(
+            "dequeued_no_automerge_label",
+            "Removed PR from consideration because the automerge label is missing",
+            details={"required_label": config.merge.automerge_label},
+        )
         await api.dequeue()
         # Update status when "show_missing_automerge_label_message" is enabled or label has been removed while already in merging state
         if config.merge.show_missing_automerge_label_message or merging:
@@ -918,6 +1006,10 @@ async def mergeable(
         or pull_request.mergeable == MergeableState.CONFLICTING
     ) and pull_request.state == PullRequestState.OPEN:
         log.info("merge_decision", reason="blocked_merge_conflict")
+        await record_decision(
+            "blocked_merge_conflict",
+            "Blocked PR because it has merge conflicts",
+        )
         await block_merge(api, pull_request, "merge conflict")
         # remove label if configured and send message
         if (
@@ -972,6 +1064,10 @@ async def mergeable(
 
     if is_draft_pull_request:
         log.info("merge_decision", reason="blocked_draft")
+        await record_decision(
+            "blocked_draft",
+            "Blocked PR because it is in draft state",
+        )
         await block_merge(api, pull_request, "pull request is in draft state")
         return
 
@@ -1244,12 +1340,24 @@ async def mergeable(
                 )
             await api.requeue()
             log.info("merge_decision", reason="requeued_blocked_unknown")
+            await record_decision(
+                "requeued_blocked_unknown",
+                "Requeued PR because GitHub reported a blocked merge without a known reason",
+            )
             await asyncio.sleep(REQUEUE_BACKOFF_SECONDS)
             return
 
     ready_to_merge = not (wait_for_checks or need_branch_update)
 
     if config.merge.do_not_merge:
+        await record_decision(
+            "do_not_merge_enabled",
+            "Stopped before merging because merge.do_not_merge is enabled",
+            details={
+                "wait_for_checks": wait_for_checks,
+                "need_branch_update": need_branch_update,
+            },
+        )
         if wait_for_checks:
             await set_status(
                 f"⌛️ waiting for required status checks: {missing_required_status_checks!r}"
@@ -1279,6 +1387,14 @@ branch protection requirements.
 
     if (config.merge.prioritize_ready_to_merge and ready_to_merge) or merging:
         log.info("merge_decision", reason="merge_attempted")
+        await record_decision(
+            "merge_attempted",
+            "Attempting to merge the PR now",
+            details={
+                "ready_to_merge": ready_to_merge,
+                "merge_method": merge_method.value,
+            },
+        )
         merge_args = get_merge_body(config, merge_method, pull_request, commits=commits)
         await set_status("⛴ attempting to merge PR (merging)")
         try:
@@ -1333,6 +1449,14 @@ branch protection requirements.
 
     else:
         log.info("merge_decision", reason="queued_for_merge")
+        await record_decision(
+            "queued_for_merge",
+            "Queued the PR for merge",
+            details={
+                "priority_merge": config.merge.priority_merge_label
+                in pull_request.labels,
+            },
+        )
         priority_merge = config.merge.priority_merge_label in pull_request.labels
         position_in_queue = await api.queue_for_merge(first=priority_merge)
         if position_in_queue is None:

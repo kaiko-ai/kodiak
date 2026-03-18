@@ -14,6 +14,7 @@ import structlog
 
 from kodiak import app_config as conf
 from kodiak.assertions import assert_never
+from kodiak.debug_history import record_debug_event, summarize_webhook_payload
 from kodiak.logging import configure_logging
 from kodiak.queue import (
     INGEST_QUEUE_NAMES,
@@ -43,17 +44,67 @@ async def work_ingest_queue(queue: WebhookQueueProtocol, queue_name: str) -> NoR
             continue
         _, value = res
         parsed_event = RawWebhookEvent.parse_raw(value)
+        webhook_summary = summarize_webhook_payload(
+            event_name=parsed_event.event_name,
+            payload=parsed_event.payload,
+        )
+        installation_id = webhook_summary.get("installation_id")
+        owner = webhook_summary.get("owner")
+        repo = webhook_summary.get("repo")
+        pr_number = webhook_summary.get("pull_request_number")
+        action = webhook_summary.get("action")
+        await record_debug_event(
+            stage="ingest",
+            event_type="ingest_dequeued",
+            message="Dequeued raw webhook from ingest queue",
+            installation_id=installation_id,
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            queue_name=queue_name,
+            delivery_id=parsed_event.delivery_id,
+            event_name=parsed_event.event_name,
+            action=action,
+        )
         try:
             await asyncio.wait_for(
                 handle_webhook_event(
                     queue=queue,
                     event_name=parsed_event.event_name,
                     payload=parsed_event.payload,
+                    delivery_id=parsed_event.delivery_id,
                 ),
                 timeout=60,
             )
         except asyncio.TimeoutError:
             log.warning("handle_webhook_event timed out")
+            await record_debug_event(
+                stage="ingest",
+                event_type="ingest_handle_timeout",
+                message="Timed out while processing a raw webhook",
+                installation_id=installation_id,
+                owner=owner,
+                repo=repo,
+                pr_number=pr_number,
+                queue_name=queue_name,
+                delivery_id=parsed_event.delivery_id,
+                event_name=parsed_event.event_name,
+                action=action,
+            )
+        else:
+            await record_debug_event(
+                stage="ingest",
+                event_type="ingest_handled",
+                message="Finished handling a raw webhook",
+                installation_id=installation_id,
+                owner=owner,
+                repo=repo,
+                pr_number=pr_number,
+                queue_name=queue_name,
+                delivery_id=parsed_event.delivery_id,
+                event_name=parsed_event.event_name,
+                action=action,
+            )
         log.info("ingest_event_handled")
 
 
