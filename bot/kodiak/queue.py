@@ -196,6 +196,16 @@ async def pr_review(
     """
     Trigger evaluation of the modified PR.
     """
+    # Prevent an infinite loop when Kodiak's own approval triggers a
+    # pull_request_review webhook, which would re-evaluate the PR and
+    # potentially approve it again.
+    if (
+        isinstance(review, PullRequestReviewEvent)
+        and review.review is not None
+        and review.review.user is not None
+        and review.review.user.login == conf.GITHUB_APP_NAME + "[bot]"
+    ):
+        return
     await queue.enqueue(
         event=WebhookEvent(
             repo_owner=review.repository.owner.login,
@@ -339,6 +349,23 @@ async def process_webhook_event(
         await redis_bot.get(webhook_event.get_merge_target_queue_name())
         == webhook_event.json().encode()
     )
+
+    # Skip the full evaluation cycle (GitHub API call + mergeable check +
+    # redundant approve/queue) if this PR is already sitting in the merge
+    # queue waiting its turn.  The repo queue consumer will handle it when
+    # it reaches the head of the queue.  We still allow evaluations for
+    # the PR that is *actively* being merged so that status updates and
+    # check-run changes are processed.
+    if not is_active_merging:
+        merge_queue_score = await redis_bot.zscore(
+            webhook_event.get_merge_queue_name(), webhook_event.json()
+        )
+        if merge_queue_score is not None:
+            log.info(
+                "skip evaluation for already-enqueued PR",
+                number=webhook_event.pull_request_number,
+            )
+            return
 
     async def dequeue() -> None:
         await redis_bot.zrem(webhook_event.get_merge_queue_name(), webhook_event.json())

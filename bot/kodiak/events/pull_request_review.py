@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 import pydantic
 
 from kodiak.events.base import GithubEvent
@@ -21,6 +25,14 @@ class Repository(pydantic.BaseModel):
     owner: Owner
 
 
+class ReviewUser(pydantic.BaseModel):
+    login: str
+
+
+class Review(pydantic.BaseModel):
+    user: Optional[ReviewUser] = None
+
+
 class PullRequestReviewEvent(GithubEvent):
     """
     https://developer.github.com/v3/activity/events/types/#pullrequestreviewevent
@@ -28,3 +40,4 @@ class PullRequestReviewEvent(GithubEvent):
 
     pull_request: PullRequest
     repository: Repository
+    review: Optional[Review] = None

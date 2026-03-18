@@ -218,7 +218,7 @@ query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
       bodyText
       %(bodyHTMLQuery)s
       url
-      reviews(first: 100) {
+      reviews(last: 100) {
         nodes {
           createdAt
           state
