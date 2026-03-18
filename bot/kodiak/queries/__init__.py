@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time as _time
 import urllib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -927,6 +928,33 @@ def has_body_html_error(errors: list[GraphQLError]) -> bool:
 
 _api_features_cache: ApiFeatures | None = None
 
+# Cache for get_config_for_ref() results. Config rarely changes during a merge,
+# so caching avoids redundant GraphQL calls on every poll cycle.
+_CONFIG_CACHE_TTL_SEC = 60
+_config_cache: dict[tuple[str, str, str, str, str | None], tuple[float, CfgInfo | None]] = {}
+
+
+def _get_cached_config(
+    key: tuple[str, str, str, str, str | None],
+) -> CfgInfo | None | object:
+    """Return cached CfgInfo, None (cached miss), or _CACHE_MISS sentinel."""
+    entry = _config_cache.get(key)
+    if entry is None:
+        return _CACHE_MISS
+    ts, value = entry
+    if (_time.monotonic() - ts) > _CONFIG_CACHE_TTL_SEC:
+        del _config_cache[key]
+        return _CACHE_MISS
+    return value
+
+
+_CACHE_MISS = object()
+
+
+def clear_config_cache() -> None:
+    """Clear the config cache. Useful for tests."""
+    _config_cache.clear()
+
 
 class ThrottlerProtocol(Protocol):
     async def __aenter__(self) -> None: ...
@@ -987,14 +1015,29 @@ class Client:
             session=self.session, installation_id=installation_id
         )
         self.session.headers["Authorization"] = f"Bearer {token}"
+        request_start = _time.monotonic()
         async with self.throttler:
             res = await self.session.post(
                 conf.GITHUB_V4_API_URL, json=(dict(query=query, variables=variables))
             )
-        rate_limit_remaining = res.headers.get("x-ratelimit-remaining")
-        rate_limit_max = res.headers.get("x-ratelimit-limit")
-        rate_limit = f"{rate_limit_remaining}/{rate_limit_max}"
-        log = log.bind(rate_limit=rate_limit)
+        duration_ms = int((_time.monotonic() - request_start) * 1000)
+        rate_limit_remaining_str = res.headers.get("x-ratelimit-remaining")
+        rate_limit_max_str = res.headers.get("x-ratelimit-limit")
+        log = log.bind(
+            rate_limit_remaining=rate_limit_remaining_str,
+            rate_limit_max=rate_limit_max_str,
+            duration_ms=duration_ms,
+        )
+        # Warn when approaching rate limits
+        try:
+            remaining = int(rate_limit_remaining_str) if rate_limit_remaining_str else None
+        except (ValueError, TypeError):
+            remaining = None
+        if remaining is not None and remaining < 100:
+            log.error("github_rate_limit_critical", remaining=remaining)
+        elif remaining is not None and remaining < 500:
+            log.warning("github_rate_limit_low", remaining=remaining)
+
         try:
             res.raise_for_status()
         except http.HTTPError:
@@ -1073,6 +1116,30 @@ query {
         )
 
     async def get_config_for_ref(
+        self, *, ref: str, org_repo_default_branch: str | None
+    ) -> CfgInfo | None:
+        cache_key = (
+            self.installation_id,
+            self.owner,
+            self.repo,
+            ref,
+            org_repo_default_branch,
+        )
+        cached = _get_cached_config(cache_key)
+        if cached is not _CACHE_MISS:
+            self.log.info("get_config_for_ref", cache_hit=True)
+            return cached  # type: ignore[return-value]
+
+        start = _time.monotonic()
+        result = await self._get_config_for_ref_uncached(
+            ref=ref, org_repo_default_branch=org_repo_default_branch
+        )
+        duration_ms = int((_time.monotonic() - start) * 1000)
+        self.log.info("get_config_for_ref", cache_hit=False, duration_ms=duration_ms)
+        _config_cache[cache_key] = (_time.monotonic(), result)
+        return result
+
+    async def _get_config_for_ref_uncached(
         self, *, ref: str, org_repo_default_branch: str | None
     ) -> CfgInfo | None:
         repo_root_config_expression = create_root_config_file_expression(branch=ref)

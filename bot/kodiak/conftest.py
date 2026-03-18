@@ -1,5 +1,13 @@
 import pytest
 
+from kodiak.queries import clear_config_cache
+
+
+@pytest.fixture(autouse=True)
+def _clear_caches() -> None:
+    """Clear module-level caches between tests to prevent leakage."""
+    clear_config_cache()
+
 
 @pytest.fixture(autouse=True)
 def configure_structlog() -> None:

@@ -74,6 +74,13 @@ WEBHOOK_CONSUMER_CONCURRENCY = config(
 
 SUBSCRIPTIONS_ENABLED = config("SUBSCRIPTIONS_ENABLED", cast=bool, default=False)
 
+# Maximum time (seconds) a single PR can spend in the merge queue poll loop
+# before being dequeued and requeued. Prevents one stuck PR from blocking
+# the entire repo merge queue forever.
+MERGE_QUEUE_POLL_TIMEOUT_SEC = config(
+    "MERGE_QUEUE_POLL_TIMEOUT_SEC", cast=int, default=600
+)
+
 # For GitHub Enterprise, the v3 API root has the form:
 # http(s)://[hostname]/api/v3, instead of https://api.github.com.
 GITHUB_V3_API_ROOT = config("GITHUB_V3_API_ROOT", default="https://api.github.com")

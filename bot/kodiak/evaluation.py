@@ -70,6 +70,10 @@ KODIAK_LOGIN = app_config.GITHUB_APP_NAME
 
 logger = structlog.get_logger()
 
+# Backoff delay (seconds) before returning from requeue paths to avoid tight
+# busy-loops (~100ms cycle) that waste API calls.
+REQUEUE_BACKOFF_SECONDS = 5
+
 
 def get_body_content(  # noqa: RET503
     *,
@@ -640,7 +644,7 @@ async def mergeable(
         await api.set_status(msg, markdown_content=markdown_content)
 
     if not isinstance(config, V1):
-        log.info("invalid config")
+        log.info("merge_decision", reason="config_error")
         await set_status(
             '⚠️ Invalid configuration (Click "Details" for more info.)',
             markdown_content=get_markdown_for_config(
@@ -786,20 +790,29 @@ async def mergeable(
         pull_request.mergeable == MergeableState.UNKNOWN
         and pull_request.state == PullRequestState.OPEN
     ):
-        # we need to trigger a test commit to fix this. We do that by calling
-        # GET on the pull request endpoint.
-        await api.trigger_test_commit()
+        is_eligible = (
+            not config.merge.require_automerge_label
+            or has_automerge_label
+            or should_dependency_automerge
+        )
+        if is_eligible:
+            # we need to trigger a test commit to fix this. We do that by calling
+            # GET on the pull request endpoint.
+            await api.trigger_test_commit()
 
-        # queue the PR for evaluation again in case GitHub doesn't send another
-        # webhook for the commit test.
-        await api.requeue()
+            # queue the PR for evaluation again in case GitHub doesn't send another
+            # webhook for the commit test.
+            await api.requeue()
+            log.info("merge_decision", reason="requeued_unknown_mergeability")
 
-        # we don't want to abort the merge if we encounter this status check.
-        # Just keep polling!
-        if merging:
-            raise PollForever
+            # we don't want to abort the merge if we encounter this status check.
+            # Just keep polling!
+            if merging:
+                raise PollForever
 
-        return
+            await asyncio.sleep(REQUEUE_BACKOFF_SECONDS)
+            return
+        # else: fall through to automerge label check at line ~897 which dequeues
 
     is_draft_pull_request = (
         pull_request.isDraft or pull_request.mergeStateStatus == MergeStateStatus.DRAFT
@@ -889,6 +902,7 @@ async def mergeable(
         and not has_automerge_label
         and not should_dependency_automerge
     ):
+        log.info("merge_decision", reason="dequeued_no_automerge_label")
         await api.dequeue()
         # Update status when "show_missing_automerge_label_message" is enabled or label has been removed while already in merging state
         if config.merge.show_missing_automerge_label_message or merging:
@@ -903,6 +917,7 @@ async def mergeable(
         pull_request.mergeStateStatus == MergeStateStatus.DIRTY
         or pull_request.mergeable == MergeableState.CONFLICTING
     ) and pull_request.state == PullRequestState.OPEN:
+        log.info("merge_decision", reason="blocked_merge_conflict")
         await block_merge(api, pull_request, "merge conflict")
         # remove label if configured and send message
         if (
@@ -956,6 +971,7 @@ async def mergeable(
         return
 
     if is_draft_pull_request:
+        log.info("merge_decision", reason="blocked_draft")
         await block_merge(api, pull_request, "pull request is in draft state")
         return
 
@@ -1227,6 +1243,8 @@ async def mergeable(
                     "Retrying (Merging blocked by GitHub requirements)"
                 )
             await api.requeue()
+            log.info("merge_decision", reason="requeued_blocked_unknown")
+            await asyncio.sleep(REQUEUE_BACKOFF_SECONDS)
             return
 
     ready_to_merge = not (wait_for_checks or need_branch_update)
@@ -1260,6 +1278,7 @@ branch protection requirements.
     # okay to merge if we reach this point.
 
     if (config.merge.prioritize_ready_to_merge and ready_to_merge) or merging:
+        log.info("merge_decision", reason="merge_attempted")
         merge_args = get_merge_body(config, merge_method, pull_request, commits=commits)
         await set_status("⛴ attempting to merge PR (merging)")
         try:
@@ -1313,6 +1332,7 @@ branch protection requirements.
             await set_status("merge complete 🎉")
 
     else:
+        log.info("merge_decision", reason="queued_for_merge")
         priority_merge = config.merge.priority_merge_label in pull_request.labels
         position_in_queue = await api.queue_for_merge(first=priority_merge)
         if position_in_queue is None:

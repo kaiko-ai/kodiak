@@ -18,6 +18,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from kodiak import app_config as conf
+from kodiak.entrypoints.debug import (
+    debug_index,
+    debug_queues_html,
+    debug_queues_json,
+    initialize_debug_token,
+)
 from kodiak.entrypoints.worker import PubsubIngestQueueSchema
 from kodiak.logging import configure_logging
 from kodiak.queue import INGEST_QUEUE_NAMES, QUEUE_PUBSUB_INGEST, get_ingest_queue
@@ -25,11 +31,29 @@ from kodiak.redis_client import redis_bot
 from kodiak.schemas import RawWebhookEvent
 
 configure_logging()
+initialize_debug_token()
 
 logger = structlog.get_logger()
 
+# Only these event types are processed by handle_webhook_event() in queue.py.
+# All others are discarded by the worker, so we filter them at ingest to avoid
+# wasting Redis writes and worker cycles.
+HANDLED_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "check_run",
+        "pull_request",
+        "pull_request_review",
+        "pull_request_review_thread",
+        "push",
+        "status",
+    }
+)
+
 app = Starlette()
 app.add_middleware(SentryAsgiMiddleware)
+app.add_route("/debug", debug_index, methods=["GET"])
+app.add_route("/debug/queues", debug_queues_html, methods=["GET"])
+app.add_route("/debug/queues.json", debug_queues_json, methods=["GET"])
 
 
 @app.route("/", methods=["GET"])
@@ -79,6 +103,10 @@ async def github_webhook_event(request: Request) -> Response:
 
     if installation_id is None:
         log.warning("unexpected_event_skipped")
+        return JSONResponse({"ok": True})
+
+    if github_event not in HANDLED_EVENT_TYPES:
+        log.info("unhandled_event_filtered", event_name=github_event)
         return JSONResponse({"ok": True})
 
     ingest_queue = get_ingest_queue(installation_id)

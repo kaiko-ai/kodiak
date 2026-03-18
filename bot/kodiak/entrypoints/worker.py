@@ -103,6 +103,12 @@ async def main() -> NoReturn:
                 work_ingest_queue(queue, queue_name=queue_name)
             )
 
+    log.info(
+        "worker_startup_summary",
+        ingest_queue_count=len(ingest_queue_names),
+        webhook_consumer_concurrency=conf.WEBHOOK_CONSUMER_CONCURRENCY,
+        merge_queue_poll_timeout_sec=conf.MERGE_QUEUE_POLL_TIMEOUT_SEC,
+    )
     log.info("start ingest_queue_watcher")
     ingest_queue_watcher = asyncio.create_task(
         ingest_queue_starter(ingest_workers, queue)
@@ -115,7 +121,7 @@ async def main() -> NoReturn:
         for queue_name, worker_task in ingest_workers.items():
             if worker_task is None or not worker_task.done():
                 continue
-            logger.info("worker task failed", kind="ingest")
+            logger.warning("worker_task_restart", kind="ingest")
             # task failed. record result and restart
             exception = worker_task.exception()
             logger.info("exception", excep=exception)
@@ -126,7 +132,7 @@ async def main() -> NoReturn:
         for task_meta, cur_task in queue.all_tasks():
             if not cur_task.done():
                 continue
-            logger.info("worker task failed", kind=task_meta.kind)
+            logger.warning("worker_task_restart", kind=task_meta.kind)
             # task failed. record result and restart
             exception = cur_task.exception()
             logger.info("exception", excep=exception)
@@ -138,7 +144,7 @@ async def main() -> NoReturn:
             else:
                 assert_never(task_meta.kind)
         if ingest_queue_watcher.done():
-            logger.info("worker task failed", kind="ingest_queue_watcher")
+            logger.warning("worker_task_restart", kind="ingest_queue_watcher")
             exception = ingest_queue_watcher.exception()
             logger.info("exception", excep=exception)
             sentry_sdk.capture_exception(exception)

@@ -116,3 +116,62 @@ def test_webhook_event_invalid_signature(
     )
     assert res.status_code == status.HTTP_400_BAD_REQUEST
     assert fake_redis.called_rpush_cnt == 0
+
+
+@pytest.mark.parametrize(
+    "event_name",
+    [
+        "check_suite",
+        "workflow_run",
+        "workflow_job",
+        "deployment",
+        "deployment_status",
+        "issues",
+    ],
+)
+def test_unhandled_event_filtered(
+    client: TestClient, event_name: str, mocker: MockFixture
+) -> None:
+    """
+    Events not in HANDLED_EVENT_TYPES should return 200 but not push to Redis.
+    """
+    fake_redis = FakeRedis()
+    mocker.patch("kodiak.entrypoints.ingest.redis_bot", fake_redis)
+    data = {"installation": {"id": 12345}, "action": "completed"}
+    body, sha = get_body_and_hash(data)
+
+    res = client.post(
+        "/api/github/hook",
+        data=body,
+        headers={"X-Github-Event": event_name, "X-Hub-Signature": f"sha1={sha}"},
+    )
+    assert res.status_code == status.HTTP_200_OK
+    assert fake_redis.called_rpush_cnt == 0, (
+        f"unhandled event {event_name!r} should not be pushed to Redis"
+    )
+
+
+@pytest.mark.parametrize(
+    "event_name",
+    ["check_run", "pull_request", "pull_request_review", "push", "status"],
+)
+def test_handled_event_passes_through(
+    client: TestClient, event_name: str, mocker: MockFixture
+) -> None:
+    """
+    Events in HANDLED_EVENT_TYPES should be pushed to Redis.
+    """
+    fake_redis = FakeRedis()
+    mocker.patch("kodiak.entrypoints.ingest.redis_bot", fake_redis)
+    data = {"installation": {"id": 12345}, "action": "completed"}
+    body, sha = get_body_and_hash(data)
+
+    res = client.post(
+        "/api/github/hook",
+        data=body,
+        headers={"X-Github-Event": event_name, "X-Hub-Signature": f"sha1={sha}"},
+    )
+    assert res.status_code == status.HTTP_200_OK
+    assert fake_redis.called_rpush_cnt == 1, (
+        f"handled event {event_name!r} should be pushed to Redis"
+    )

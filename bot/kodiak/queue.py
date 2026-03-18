@@ -48,6 +48,10 @@ def get_ingest_queue(installation_id: int) -> str:
 
 RETRY_RATE_SECONDS = 2
 
+# Maximum number of PRs to enqueue in a single status_event when the event
+# comes from a fork (len(refs)==0). Prevents 100+ PR bulk enqueue floods.
+MAX_BULK_ENQUEUE = 50
+
 
 def installation_id_from_queue(queue_name: str) -> str:
     """
@@ -134,7 +138,8 @@ async def status_event(queue: WebhookQueueProtocol, status_event: StatusEvent) -
     async with Client(
         owner=owner, repo=repo, installation_id=installation_id
     ) as api_client:
-        if len(refs) == 0:
+        fork_path = len(refs) == 0
+        if fork_path:
             # when a pull request is from a fork the status event will not have
             # any `branches`, so to be able to trigger evaluation of the PR, we
             # fetch all pull requests.
@@ -164,7 +169,23 @@ async def status_event(queue: WebhookQueueProtocol, status_event: StatusEvent) -
                         installation_id=str(installation_id),
                     )
                 )
-        for event in all_events:
+
+        pr_count = len(all_events)
+        log.info(
+            "status_event_enqueue",
+            pr_count=pr_count,
+            fork_path=fork_path,
+        )
+        if fork_path and pr_count > MAX_BULK_ENQUEUE:
+            log.warning(
+                "status_event_bulk_enqueue_capped",
+                total=pr_count,
+                cap=MAX_BULK_ENQUEUE,
+            )
+
+        for enqueued, event in enumerate(all_events):
+            if fork_path and enqueued >= MAX_BULK_ENQUEUE:
+                break
             await queue.enqueue(event=event)
 
 
@@ -479,6 +500,11 @@ class RedisWebhookQueue:
             self.start_webhook_worker(queue_name=queue_name)
 
     def start_webhook_worker(self, *, queue_name: str) -> None:
+        logger.info(
+            "start_webhook_worker",
+            queue_name=queue_name,
+            concurrency=conf.WEBHOOK_CONSUMER_CONCURRENCY,
+        )
         for i in range(conf.WEBHOOK_CONSUMER_CONCURRENCY):
             worker_key = f"{queue_name}:worker:{i}"
             self._start_worker(
@@ -509,10 +535,10 @@ class RedisWebhookQueue:
             if not worker_task.done():
                 fut.close()
                 return
-            log.info("task failed")
+            log.warning("worker_task_failed")
             # task failed. record result and restart
             exception = worker_task.exception()
-            log.info("exception", excep=exception)
+            log.warning("worker_task_exception", excep=exception)
             sentry_sdk.capture_exception(exception)
         log.info("creating task for queue")
         # create new task for queue
@@ -526,14 +552,16 @@ class RedisWebhookQueue:
         async with redis_bot.pipeline(transaction=True) as pipe:
             pipe.sadd(WEBHOOK_QUEUE_NAMES, queue_name)
             pipe.zadd(queue_name, {event.json(): time.time()}, nx=True)
-            await pipe.execute()
+            pipe.zcard(queue_name)
+            results = await pipe.execute()
+        queue_depth = results[-1] if results else None
         log = logger.bind(
             owner=event.repo_owner,
             repo=event.repo_name,
             number=event.pull_request_number,
             install=event.installation_id,
         )
-        log.info("enqueue webhook event")
+        log.info("enqueue webhook event", queue_depth=queue_depth)
         self.start_webhook_worker(queue_name=queue_name)
 
     async def enqueue_for_repo(
@@ -570,10 +598,9 @@ class RedisWebhookQueue:
             install=event.installation_id,
         )
 
-        log.info("enqueue repo event")
-        self.start_repo_worker(queue_name=queue_name)
-
         zrange_results = results[-1]  # type: list[tuple[bytes, float]]
+        log.info("enqueue repo event", queue_depth=len(zrange_results))
+        self.start_repo_worker(queue_name=queue_name)
         kvs = sorted(
             ((key, value) for key, value in zrange_results), key=lambda x: x[1]
         )
