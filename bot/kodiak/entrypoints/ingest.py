@@ -126,4 +126,4 @@ async def github_webhook_event(request: Request) -> Response:
 
 
 if __name__ == "__main__":
-    uvicorn.run("kodiak.entrypoints.ingest:app", host="0.0.0.0", port=conf.PORT)
+    uvicorn.run(app, host="0.0.0.0", port=conf.PORT)  # type: ignore[arg-type]
