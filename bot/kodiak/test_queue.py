@@ -157,9 +157,7 @@ async def test_process_webhook_event_skips_stale_head_sha(mocker) -> None:  # ty
             )
         ),
     )
-    mock_evaluate_pr = mocker.patch(
-        "kodiak.queue.evaluate_pr", mocker.AsyncMock()
-    )
+    mock_evaluate_pr = mocker.patch("kodiak.queue.evaluate_pr", mocker.AsyncMock())
     mocker.patch("kodiak.queue.record_debug_event", mocker.AsyncMock())
 
     await process_webhook_event(

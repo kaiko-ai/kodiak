@@ -523,8 +523,12 @@ async def process_webhook_event(
     )
 
     if webhook_event.head_sha is not None:
-        latest_head_sha = await redis_bot.get(webhook_event.get_latest_webhook_head_sha_key())
-        latest_head_sha_str = _decode_redis_text(latest_head_sha) if latest_head_sha else None
+        latest_head_sha = await redis_bot.get(
+            webhook_event.get_latest_webhook_head_sha_key()
+        )
+        latest_head_sha_str = (
+            _decode_redis_text(latest_head_sha) if latest_head_sha else None
+        )
         if (
             latest_head_sha_str is not None
             and latest_head_sha_str != webhook_event.head_sha
@@ -915,7 +919,9 @@ class RedisWebhookQueue:
             else:
                 # use only_if_not_exists to prevent changing queue positions on new
                 # webhook events.
-                pipe.zadd(queue_name, {event.merge_queue_member(): time.time()}, nx=True)
+                pipe.zadd(
+                    queue_name, {event.merge_queue_member(): time.time()}, nx=True
+                )
             pipe.zrange(queue_name, 0, 1000, withscores=True)
             results = await pipe.execute()
         log = logger.bind(
