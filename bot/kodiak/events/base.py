@@ -1,3 +1,5 @@
+from typing import Optional
+
 import pydantic
 
 
@@ -7,3 +9,4 @@ class Installation(pydantic.BaseModel):
 
 class GithubEvent(pydantic.BaseModel):
     installation: Installation
+    action: Optional[str] = None

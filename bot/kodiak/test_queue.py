@@ -2,8 +2,15 @@ from typing import Optional
 from unittest.mock import patch
 
 import pytest
+import structlog
 
-from kodiak.queue import RedisWebhookQueue, TaskMeta, installation_id_from_queue
+from kodiak.queue import (
+    RedisWebhookQueue,
+    TaskMeta,
+    WebhookEvent,
+    installation_id_from_queue,
+    process_webhook_event,
+)
 
 
 @pytest.mark.parametrize(
@@ -117,3 +124,63 @@ class _FakeTask:
 
     def exception(self) -> Optional[BaseException]:
         return None
+
+
+@pytest.mark.asyncio
+async def test_process_webhook_event_skips_stale_head_sha(mocker) -> None:  # type: ignore[no-untyped-def]
+    event = WebhookEvent(
+        repo_owner="acme",
+        repo_name="widgets",
+        pull_request_number=42,
+        installation_id="117046149",
+        target_name="main",
+        head_sha="oldsha",
+    )
+    queue_name = event.get_webhook_queue_name()
+
+    redis_mock = mocker.patch("kodiak.queue.redis_bot")
+    redis_mock.get = mocker.AsyncMock(
+        side_effect=lambda key: {
+            event.get_merge_target_queue_name(): None,
+            event.get_latest_webhook_head_sha_key(): b"newsha",
+        }.get(key)
+    )
+    redis_mock.zscore = mocker.AsyncMock(return_value=None)
+
+    mocker.patch(
+        "kodiak.queue.bzpopmin_with_timeout",
+        mocker.AsyncMock(
+            return_value=(
+                queue_name.encode(),
+                event.webhook_queue_member().encode(),
+                123.0,
+            )
+        ),
+    )
+    mock_evaluate_pr = mocker.patch(
+        "kodiak.queue.evaluate_pr", mocker.AsyncMock()
+    )
+    mocker.patch("kodiak.queue.record_debug_event", mocker.AsyncMock())
+
+    await process_webhook_event(
+        RedisWebhookQueue(),
+        queue_name,
+        structlog.get_logger(),
+    )
+
+    mock_evaluate_pr.assert_not_called()
+    redis_mock.zscore.assert_not_called()
+
+
+def test_webhook_event_queue_serialization_is_sha_aware() -> None:
+    event = WebhookEvent(
+        repo_owner="acme",
+        repo_name="widgets",
+        pull_request_number=42,
+        installation_id="117046149",
+        target_name="main",
+        head_sha="abc123",
+    )
+
+    assert '"head_sha": "abc123"' in event.webhook_queue_member()
+    assert "head_sha" not in event.merge_queue_member()

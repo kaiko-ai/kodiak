@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 import pydantic
 
@@ -21,6 +21,7 @@ class PullRequest(pydantic.BaseModel):
 
 class CheckRun(pydantic.BaseModel):
     name: str
+    head_sha: Optional[str] = None
     pull_requests: List[PullRequest]
 
 
