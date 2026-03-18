@@ -22,7 +22,7 @@ def client() -> TestClient:
 @pytest.fixture(autouse=True)
 def _init_token() -> None:
     """Re-initialize token for every test so state doesn't leak."""
-    initialize_debug_token()
+    initialize_debug_token(_force=True)
 
 
 def _get_token() -> str:
@@ -173,7 +173,7 @@ def test_env_token_override(mock_redis: AsyncMock) -> None:
     mock_redis.smembers = AsyncMock(return_value=set())
 
     with patch.dict(os.environ, {"DEBUG_TOKEN": "my-stable-token"}):
-        initialize_debug_token()
+        initialize_debug_token(_force=True)
 
     assert _get_token() == "my-stable-token"
 
