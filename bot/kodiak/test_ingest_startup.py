@@ -4,6 +4,7 @@ Smoke tests to ensure the ingest app starts and serves HTTP.
 These catch regressions like import errors or uvicorn misconfiguration
 that silently prevent the server from listening.
 """
+
 from __future__ import annotations
 
 from starlette.testclient import TestClient
