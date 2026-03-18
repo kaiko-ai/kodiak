@@ -78,7 +78,7 @@ SUBSCRIPTIONS_ENABLED = config("SUBSCRIPTIONS_ENABLED", cast=bool, default=False
 # before being dequeued and requeued. Prevents one stuck PR from blocking
 # the entire repo merge queue forever.
 MERGE_QUEUE_POLL_TIMEOUT_SEC = config(
-    "MERGE_QUEUE_POLL_TIMEOUT_SEC", cast=int, default=600
+    "MERGE_QUEUE_POLL_TIMEOUT_SEC", cast=int, default=300
 )
 
 # For GitHub Enterprise, the v3 API root has the form:
