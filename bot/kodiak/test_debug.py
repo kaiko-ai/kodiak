@@ -62,7 +62,7 @@ def test_empty_token_returns_403(client: TestClient, route: str) -> None:
 @pytest.mark.parametrize("route", DEBUG_ROUTES)
 def test_forged_cookie_returns_403(client: TestClient, route: str) -> None:
     """A hand-crafted cookie with the wrong value must be rejected."""
-    client.cookies.set("kodiak_debug_token", "forged-value")
+    client.cookies["kodiak_debug_token"] = "forged-value"
     res = client.get(route)
     assert res.status_code == status.HTTP_403_FORBIDDEN
 
