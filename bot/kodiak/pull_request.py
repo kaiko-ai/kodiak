@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Type
 
@@ -74,6 +75,9 @@ async def evaluate_pr(
     skippable_check_timeout = 4
     api_call_retries_remaining = 5
     api_call_errors = []  # type: list[APICallError]
+    poll_start_time: float | None = None
+    cycle_count = 0
+    start_time = time.monotonic()
     log = log.bind(owner=owner, repo=repo, number=number, merging=merging)
     while True:
         log.info("get_pr")
@@ -126,7 +130,12 @@ async def evaluate_pr(
                     ),
                     timeout=60,
                 )
-                log.info("evaluate_pr successful")
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+                log.info(
+                    "evaluate_pr_complete",
+                    duration_ms=duration_ms,
+                    cycles=cycle_count,
+                )
             except RetryForSkippableChecks:
                 if skippable_check_timeout > 0:
                     skippable_check_timeout -= 1
@@ -134,7 +143,28 @@ async def evaluate_pr(
                     await asyncio.sleep(RETRY_RATE_SECONDS)
                     continue
             except PollForever:
-                log.info("polling")
+                cycle_count += 1
+                if poll_start_time is None:
+                    poll_start_time = time.monotonic()
+                elapsed_ms = int((time.monotonic() - poll_start_time) * 1000)
+                log.info(
+                    "polling",
+                    cycle=cycle_count,
+                    elapsed_ms=elapsed_ms,
+                )
+                if (
+                    merging
+                    and (time.monotonic() - poll_start_time)
+                    > conf.MERGE_QUEUE_POLL_TIMEOUT_SEC
+                ):
+                    log.warning(
+                        "merge_queue_poll_timeout",
+                        elapsed_sec=int(time.monotonic() - poll_start_time),
+                        cycles=cycle_count,
+                    )
+                    await dequeue_callback()
+                    await requeue_callback()
+                    return
                 await asyncio.sleep(POLL_RATE_SECONDS)
                 continue
             except ApiCallException as e:
@@ -194,6 +224,7 @@ class PRV2:
         self.queue_for_merge_callback = queue_for_merge_callback
         self.log = logger.bind(install=install, owner=owner, repo=repo, number=number)
         self.client = client or Client
+        self._last_status_message: str | None = None
 
     async def dequeue(self) -> None:
         self.log.info("dequeue")
@@ -213,6 +244,9 @@ class PRV2:
         status check. This detail view is accessible via the "Details" link
         alongside the summary/detail content.
         """
+        if msg == self._last_status_message:
+            self.log.info("set_status_skipped_duplicate", message=msg)
+            return
         self.log.info("set_status", message=msg, markdown_content=markdown_content)
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
@@ -228,6 +262,8 @@ class PRV2:
                 self.log.warning(
                     "failed to create notification", res=res, exc_info=True
                 )
+            else:
+                self._last_status_message = msg
 
     async def pull_requests_for_ref(self, ref: str) -> Optional[int]:
         log = self.log.bind(ref=ref)

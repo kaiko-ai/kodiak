@@ -2443,3 +2443,65 @@ async def test_mergeable_priority_merge_label() -> None:
     assert api.dequeue.call_count == 0
     assert api.update_branch.call_count == 0
     assert api.merge.call_count == 0
+
+
+async def test_unknown_mergeability_no_automerge_label_skips_trigger() -> None:
+    """
+    When mergeability is UNKNOWN but the PR doesn't have the automerge label
+    and require_automerge_label is True, we should NOT trigger_test_commit or
+    requeue. Instead, the PR should fall through to the automerge label check
+    and be dequeued.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    config.merge.require_automerge_label = True
+    pull_request = create_pull_request()
+    pull_request.mergeable = MergeableState.UNKNOWN
+    # Remove the automerge label
+    pull_request.labels = ["bugfix"]
+
+    await mergeable(api=api, config=config, pull_request=pull_request)
+    assert api.trigger_test_commit.call_count == 0, (
+        "should not waste an API call on trigger_test_commit for ineligible PRs"
+    )
+    assert api.requeue.call_count == 0
+    assert api.dequeue.call_count == 1, "should dequeue because no automerge label"
+
+
+async def test_unknown_mergeability_no_require_label_triggers() -> None:
+    """
+    When require_automerge_label is False, UNKNOWN mergeability should always
+    trigger_test_commit regardless of labels.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    config.merge.require_automerge_label = False
+    pull_request = create_pull_request()
+    pull_request.mergeable = MergeableState.UNKNOWN
+    pull_request.labels = []  # no labels at all
+
+    await mergeable(api=api, config=config, pull_request=pull_request)
+    assert api.trigger_test_commit.call_count == 1
+    assert api.requeue.call_count == 1
+    assert api.dequeue.call_count == 0
+
+
+async def test_unknown_mergeability_with_automerge_label_triggers() -> None:
+    """
+    When mergeability is UNKNOWN and the PR has the automerge label,
+    trigger_test_commit should still fire normally.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    config.merge.require_automerge_label = True
+    pull_request = create_pull_request()
+    pull_request.mergeable = MergeableState.UNKNOWN
+    pull_request.labels = ["bugfix", "automerge"]
+
+    await mergeable(api=api, config=config, pull_request=pull_request)
+    assert api.trigger_test_commit.call_count == 1
+    assert api.requeue.call_count == 1
+    assert api.dequeue.call_count == 0
