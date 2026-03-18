@@ -286,7 +286,9 @@ def test_debug_queues_json_shows_queue_previews_and_timelines(
     assert data["summary"]["merge_queue_count"] == 1
     assert data["merge_queues"][0]["current_target"]["pr_number"] == 42
     assert data["webhook_queues"][0]["pending_events"][0]["pr_number"] == 42
-    assert data["ingest_queues"][0]["pending_events"][0]["delivery_id"] == "delivery-123"
+    assert (
+        data["ingest_queues"][0]["pending_events"][0]["delivery_id"] == "delivery-123"
+    )
     assert data["pr_timelines"][0]["pr_key"] == "acme/widgets#42"
     assert data["webhook_timelines"][0]["delivery_id"] == "delivery-123"
 

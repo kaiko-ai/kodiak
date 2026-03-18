@@ -130,6 +130,7 @@ def _queue_member_from_webhook_event(
         "pr_number": event.pull_request_number,
         "target_branch": event.target_name,
         "installation_id": event.installation_id,
+        "head_sha": event.head_sha,
         "enqueued_at": score,
         "enqueued_at_iso": _format_ts(score),
         "age_sec": _format_age_seconds(score, now=now),
@@ -236,7 +237,12 @@ async def _collect_merge_queues(
                     "target_branch": target_event.target_name,
                     "installation_id": target_event.installation_id,
                 }
-            except (json.JSONDecodeError, pydantic.ValidationError, TypeError, ValueError):
+            except (
+                json.JSONDecodeError,
+                pydantic.ValidationError,
+                TypeError,
+                ValueError,
+            ):
                 current_target = {"raw": _decode_redis_value(target_raw)}
         if target_time_raw:
             try:
@@ -262,7 +268,12 @@ async def _collect_merge_queues(
                 pr_list.append(
                     _queue_member_from_webhook_event(event, score=score, now=now)
                 )
-            except (json.JSONDecodeError, pydantic.ValidationError, TypeError, ValueError):
+            except (
+                json.JSONDecodeError,
+                pydantic.ValidationError,
+                TypeError,
+                ValueError,
+            ):
                 pr_list.append(
                     {
                         "raw": _decode_redis_value(member),
@@ -301,7 +312,10 @@ async def _collect_webhook_queues(
     now = time.time()
     queues = []
     for raw in sorted(_decode_redis_value(value) for value in queue_names_raw):
-        if installation_id is not None and installation_id_from_queue(raw) != installation_id:
+        if (
+            installation_id is not None
+            and installation_id_from_queue(raw) != installation_id
+        ):
             continue
 
         size = await redis_bot.zcard(raw)
@@ -328,7 +342,12 @@ async def _collect_webhook_queues(
                 pending_events.append(
                     _queue_member_from_webhook_event(event, score=score, now=now)
                 )
-            except (json.JSONDecodeError, pydantic.ValidationError, TypeError, ValueError):
+            except (
+                json.JSONDecodeError,
+                pydantic.ValidationError,
+                TypeError,
+                ValueError,
+            ):
                 pending_events.append(
                     {
                         "raw": _decode_redis_value(member),
@@ -362,7 +381,10 @@ async def _collect_ingest_queues(
     queue_names_raw = await redis_bot.smembers(INGEST_QUEUE_NAMES)
     queues = []
     for raw in sorted(_decode_redis_value(value) for value in queue_names_raw):
-        if installation_id is not None and installation_id_from_queue(raw) != installation_id:
+        if (
+            installation_id is not None
+            and installation_id_from_queue(raw) != installation_id
+        ):
             continue
 
         length = await redis_bot.llen(raw)
@@ -372,7 +394,12 @@ async def _collect_ingest_queues(
             try:
                 event = RawWebhookEvent.parse_raw(event_raw)
                 pending_events.append(_queue_member_from_raw_webhook(event))
-            except (json.JSONDecodeError, pydantic.ValidationError, TypeError, ValueError):
+            except (
+                json.JSONDecodeError,
+                pydantic.ValidationError,
+                TypeError,
+                ValueError,
+            ):
                 pending_events.append({"raw": _decode_redis_value(event_raw)})
 
         queues.append(
@@ -534,12 +561,18 @@ async def _collect_all_data(
     return {
         "summary": {
             "merge_queue_count": len(merge_queues),
-            "merge_queue_active_count": sum(1 for queue in merge_queues if queue["active"]),
+            "merge_queue_active_count": sum(
+                1 for queue in merge_queues if queue["active"]
+            ),
             "merge_queue_pending_prs": sum(queue["size"] for queue in merge_queues),
             "webhook_queue_count": len(webhook_queues),
-            "webhook_queue_pending_events": sum(queue["size"] for queue in webhook_queues),
+            "webhook_queue_pending_events": sum(
+                queue["size"] for queue in webhook_queues
+            ),
             "ingest_queue_count": len(ingest_queues),
-            "ingest_queue_pending_events": sum(queue["length"] for queue in ingest_queues),
+            "ingest_queue_pending_events": sum(
+                queue["length"] for queue in ingest_queues
+            ),
             "recent_event_count": len(recent_events),
             "recent_pr_count": len(pr_timelines),
             "recent_webhook_count": len(webhook_timelines),
@@ -609,12 +642,14 @@ def _render_queue_item_list(items: list[dict[str, Any]], *, title_key: str) -> s
                 continue
             if key == "age_sec":
                 value = f"{value}s"
-            meta_parts.append(f"<span><strong>{_escape(label)}:</strong> {_escape(value)}</span>")
+            meta_parts.append(
+                f"<span><strong>{_escape(label)}:</strong> {_escape(value)}</span>"
+            )
         rendered.append(
             f"""
             <li class="queue-item">
                 <div class="queue-item-title">{_escape(title)}</div>
-                <div class="meta-line">{''.join(meta_parts)}</div>
+                <div class="meta-line">{"".join(meta_parts)}</div>
                 <details>
                     <summary>Details</summary>
                     {_render_json_block(item)}
@@ -648,16 +683,16 @@ def _render_queue_cards(
                 <article class="queue-card">
                     <div class="queue-card-head">
                         <div>
-                            <h3>{_escape(queue.get('owner') or '?')}/{_escape(queue.get('repo') or '?')} / {_escape(queue.get('branch') or '?')}</h3>
-                            <div class="muted">{_escape(queue['name'])}</div>
+                            <h3>{_escape(queue.get("owner") or "?")}/{_escape(queue.get("repo") or "?")} / {_escape(queue.get("branch") or "?")}</h3>
+                            <div class="muted">{_escape(queue["name"])}</div>
                         </div>
-                        <span class="pill {'pill-active' if queue['active'] else 'pill-idle'}">{'active' if queue['active'] else 'idle'}</span>
+                        <span class="pill {"pill-active" if queue["active"] else "pill-idle"}">{"active" if queue["active"] else "idle"}</span>
                     </div>
                     <div class="meta-grid">
-                        <div><strong>Installation:</strong> {_escape(queue['installation_id'])}</div>
-                        <div><strong>Queued PRs:</strong> {_escape(queue['size'])}</div>
-                        <div><strong>Merging PR:</strong> {_escape(queue.get('merging_pr') or '-')}</div>
-                        <div><strong>Merge Duration:</strong> {_escape(f"{queue['merge_duration_sec']}s" if queue['merge_duration_sec'] is not None else '-')}</div>
+                        <div><strong>Installation:</strong> {_escape(queue["installation_id"])}</div>
+                        <div><strong>Queued PRs:</strong> {_escape(queue["size"])}</div>
+                        <div><strong>Merging PR:</strong> {_escape(queue.get("merging_pr") or "-")}</div>
+                        <div><strong>Merge Duration:</strong> {_escape(f"{queue['merge_duration_sec']}s" if queue["merge_duration_sec"] is not None else "-")}</div>
                     </div>
                     <details open>
                         <summary>Current Merge Slot</summary>
@@ -680,16 +715,16 @@ def _render_queue_cards(
                 <article class="queue-card">
                     <div class="queue-card-head">
                         <div>
-                            <h3>{_escape(queue['name'])}</h3>
-                            <div class="muted">{_escape(queue['description'])}</div>
+                            <h3>{_escape(queue["name"])}</h3>
+                            <div class="muted">{_escape(queue["description"])}</div>
                         </div>
-                        <span class="pill {'pill-active' if queue['size'] else 'pill-idle'}">{'busy' if queue['size'] else 'idle'}</span>
+                        <span class="pill {"pill-active" if queue["size"] else "pill-idle"}">{"busy" if queue["size"] else "idle"}</span>
                     </div>
                     <div class="meta-grid">
-                        <div><strong>Installation:</strong> {_escape(queue['installation_id'])}</div>
-                        <div><strong>Queued PR evaluations:</strong> {_escape(queue['size'])}</div>
-                        <div><strong>Oldest:</strong> {_escape(queue.get('oldest_event_iso') or '-')}</div>
-                        <div><strong>Newest:</strong> {_escape(queue.get('newest_event_iso') or '-')}</div>
+                        <div><strong>Installation:</strong> {_escape(queue["installation_id"])}</div>
+                        <div><strong>Queued PR evaluations:</strong> {_escape(queue["size"])}</div>
+                        <div><strong>Oldest:</strong> {_escape(queue.get("oldest_event_iso") or "-")}</div>
+                        <div><strong>Newest:</strong> {_escape(queue.get("newest_event_iso") or "-")}</div>
                     </div>
                     <details open>
                         <summary>Pending PR Evaluation Preview</summary>
@@ -708,14 +743,14 @@ def _render_queue_cards(
                 <article class="queue-card">
                     <div class="queue-card-head">
                         <div>
-                            <h3>{_escape(queue['name'])}</h3>
-                            <div class="muted">{_escape(queue['description'])}</div>
+                            <h3>{_escape(queue["name"])}</h3>
+                            <div class="muted">{_escape(queue["description"])}</div>
                         </div>
-                        <span class="pill {'pill-active' if queue['length'] else 'pill-idle'}">{'busy' if queue['length'] else 'idle'}</span>
+                        <span class="pill {"pill-active" if queue["length"] else "pill-idle"}">{"busy" if queue["length"] else "idle"}</span>
                     </div>
                     <div class="meta-grid">
-                        <div><strong>Installation:</strong> {_escape(queue['installation_id'])}</div>
-                        <div><strong>Queued raw webhooks:</strong> {_escape(queue['length'])}</div>
+                        <div><strong>Installation:</strong> {_escape(queue["installation_id"])}</div>
+                        <div><strong>Queued raw webhooks:</strong> {_escape(queue["length"])}</div>
                     </div>
                     <details open>
                         <summary>Pending Webhook Preview</summary>
@@ -741,11 +776,11 @@ def _render_timeline_event(event: dict[str, Any]) -> str:
     return f"""
     <li class="timeline-entry">
         <div class="timeline-entry-head">
-            <span class="pill pill-stage">{_escape(event.get('stage') or '?')}</span>
-            <code>{_escape(event.get('event_type') or '?')}</code>
-            <span class="muted">{_escape(event.get('ts_iso') or '-')}</span>
+            <span class="pill pill-stage">{_escape(event.get("stage") or "?")}</span>
+            <code>{_escape(event.get("event_type") or "?")}</code>
+            <span class="muted">{_escape(event.get("ts_iso") or "-")}</span>
         </div>
-        <div class="timeline-message">{_escape(event.get('message') or '')}</div>
+        <div class="timeline-message">{_escape(event.get("message") or "")}</div>
         {details_html}
     </li>
     """
@@ -764,8 +799,7 @@ def _render_timeline_groups(
     for group in groups:
         if title_builder == "pr":
             title = (
-                f"{group.get('owner')}/{group.get('repo')} "
-                f"#{group.get('pr_number')}"
+                f"{group.get('owner')}/{group.get('repo')} #{group.get('pr_number')}"
             )
             meta = [
                 f"<span><strong>Latest:</strong> {_escape(group.get('latest_ts_iso') or '-')}</span>",
@@ -805,9 +839,9 @@ def _render_timeline_groups(
                         <h3>{title}</h3>
                     </div>
                 </div>
-                <div class="meta-line">{''.join(meta)}</div>
+                <div class="meta-line">{"".join(meta)}</div>
                 <ol class="timeline-list">
-                    {''.join(_render_timeline_event(event) for event in group['events'])}
+                    {"".join(_render_timeline_event(event) for event in group["events"])}
                 </ol>
             </article>
             """
@@ -823,19 +857,23 @@ def _render_recent_events(events: list[dict[str, Any]]) -> str:
     rows = []
     for event in events:
         target = "-"
-        if event.get("owner") and event.get("repo") and event.get("pr_number") is not None:
+        if (
+            event.get("owner")
+            and event.get("repo")
+            and event.get("pr_number") is not None
+        ):
             target = f"{event['owner']}/{event['repo']}#{event['pr_number']}"
         elif event.get("owner") and event.get("repo"):
             target = f"{event['owner']}/{event['repo']}"
         rows.append(
             f"""
             <tr>
-                <td>{_escape(event.get('ts_iso') or '-')}</td>
-                <td><code>{_escape(event.get('stage') or '-')}</code></td>
-                <td><code>{_escape(event.get('event_type') or '-')}</code></td>
+                <td>{_escape(event.get("ts_iso") or "-")}</td>
+                <td><code>{_escape(event.get("stage") or "-")}</code></td>
+                <td><code>{_escape(event.get("event_type") or "-")}</code></td>
                 <td>{_escape(target)}</td>
-                <td>{_escape(event.get('queue_name') or '-')}</td>
-                <td>{_escape(event.get('message') or '-')}</td>
+                <td>{_escape(event.get("queue_name") or "-")}</td>
+                <td>{_escape(event.get("message") or "-")}</td>
             </tr>
             """
         )
@@ -852,7 +890,7 @@ def _render_recent_events(events: list[dict[str, Any]]) -> str:
             </tr>
         </thead>
         <tbody>
-            {''.join(rows)}
+            {"".join(rows)}
         </tbody>
     </table>
     """
@@ -1083,7 +1121,7 @@ def _render_html(data: dict[str, Any]) -> str:
                 <p class="muted">Collected at {collected_at}</p>
                 <h1>Kodiak Debug Console</h1>
                 <p>This view shows live queue state plus a bounded debug history of webhook processing, PR evaluations, status updates, queue moves, and merge decisions.</p>
-                <p class="muted">Scope: {_escape(install_filter)}. Queue preview limit: {_escape(data['filters']['queue_preview_limit'])}. History limit: {_escape(data['filters']['history_limit'])}.</p>
+                <p class="muted">Scope: {_escape(install_filter)}. Queue preview limit: {_escape(data["filters"]["queue_preview_limit"])}. History limit: {_escape(data["filters"]["history_limit"])}.</p>
             </div>
             <div class="summary-grid">
                 {_render_summary_cards(data["summary"])}
@@ -1092,49 +1130,49 @@ def _render_html(data: dict[str, Any]) -> str:
 
         <section>
             <h2>How To Read This</h2>
-            <p>{_escape(QUEUE_DEFINITIONS['ingest_queues'])}</p>
-            <p>{_escape(QUEUE_DEFINITIONS['webhook_queues'])}</p>
-            <p>{_escape(QUEUE_DEFINITIONS['merge_queues'])}</p>
-            <p class="muted">{_escape(QUEUE_DEFINITIONS['registry_behavior'])}</p>
+            <p>{_escape(QUEUE_DEFINITIONS["ingest_queues"])}</p>
+            <p>{_escape(QUEUE_DEFINITIONS["webhook_queues"])}</p>
+            <p>{_escape(QUEUE_DEFINITIONS["merge_queues"])}</p>
+            <p class="muted">{_escape(QUEUE_DEFINITIONS["registry_behavior"])}</p>
         </section>
 
         <section>
-            <h2>Merge Queues ({_escape(len(data['merge_queues']))})</h2>
+            <h2>Merge Queues ({_escape(len(data["merge_queues"]))})</h2>
             <div class="queue-grid">
                 {_render_queue_cards(data["merge_queues"], kind="merge", empty_message="No merge queues are currently registered.")}
             </div>
         </section>
 
         <section>
-            <h2>PR Evaluation Queues ({_escape(len(data['webhook_queues']))})</h2>
+            <h2>PR Evaluation Queues ({_escape(len(data["webhook_queues"]))})</h2>
             <div class="queue-grid">
                 {_render_queue_cards(data["webhook_queues"], kind="webhook", empty_message="No PR evaluation queues are currently registered.")}
             </div>
         </section>
 
         <section>
-            <h2>Raw Webhook Ingest Queues ({_escape(len(data['ingest_queues']))})</h2>
+            <h2>Raw Webhook Ingest Queues ({_escape(len(data["ingest_queues"]))})</h2>
             <div class="queue-grid">
                 {_render_queue_cards(data["ingest_queues"], kind="ingest", empty_message="No ingest queues are currently registered.")}
             </div>
         </section>
 
         <section>
-            <h2>Recent PR Timelines ({_escape(len(data['pr_timelines']))})</h2>
+            <h2>Recent PR Timelines ({_escape(len(data["pr_timelines"]))})</h2>
             <div class="timeline-grid">
                 {_render_timeline_groups(data["pr_timelines"], title_builder="pr", empty_message="No recent PR debug history recorded yet.")}
             </div>
         </section>
 
         <section>
-            <h2>Recent Webhook Timelines ({_escape(len(data['webhook_timelines']))})</h2>
+            <h2>Recent Webhook Timelines ({_escape(len(data["webhook_timelines"]))})</h2>
             <div class="timeline-grid">
                 {_render_timeline_groups(data["webhook_timelines"], title_builder="webhook", empty_message="No recent webhook debug history recorded yet.")}
             </div>
         </section>
 
         <section>
-            <h2>Recent Debug Events ({_escape(len(data['recent_events']))})</h2>
+            <h2>Recent Debug Events ({_escape(len(data["recent_events"]))})</h2>
             {_render_recent_events(data["recent_events"])}
         </section>
     </main>
