@@ -450,9 +450,8 @@ class WebhookEvent(BaseModel):
     target_name: str
     head_sha: Optional[str] = None
 
-    def json(self, **kwargs: object) -> str:  # type: ignore[override]
-        kwargs.setdefault("exclude_none", True)
-        return super().json(**kwargs)
+    def webhook_queue_member(self) -> str:
+        return super().json(exclude_none=True)
 
     def get_merge_queue_name(self) -> str:
         return get_merge_queue_name(self)
@@ -469,11 +468,8 @@ class WebhookEvent(BaseModel):
             f"{self.repo_owner}/{self.repo_name}#{self.pull_request_number}"
         )
 
-    def webhook_queue_member(self) -> str:
-        return self.json()
-
     def merge_queue_member(self) -> str:
-        return self.json(exclude={"head_sha"})
+        return super().json(exclude={"head_sha"}, exclude_none=True)
 
     def __hash__(self) -> int:
         return (
