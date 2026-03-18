@@ -42,6 +42,7 @@ MERGE_QUEUE_NAMES = "kodiak_merge_queue_names:v2"
 MERGE_QUEUE_BY_INSTALL_PREFIX = "merge_queue_by_install:"
 WEBHOOK_QUEUE_NAMES = "kodiak_webhook_queue_names"
 QUEUE_PUBSUB_INGEST = "kodiak:pubsub:ingest"
+WEBHOOK_LATEST_HEAD_SHA_PREFIX = "kodiak:webhook_latest_head_sha:"
 
 
 def get_ingest_queue(installation_id: int) -> str:
@@ -53,6 +54,21 @@ RETRY_RATE_SECONDS = 2
 # Maximum number of PRs to enqueue in a single status_event when the event
 # comes from a fork (len(refs)==0). Prevents 100+ PR bulk enqueue floods.
 MAX_BULK_ENQUEUE = 50
+
+# These webhook actions do not affect mergeability or queue position, so
+# re-fetching the full PR state would only burn API quota.
+NON_ACTIONABLE_PULL_REQUEST_ACTIONS: frozenset[str] = frozenset(
+    {
+        "assigned",
+        "unassigned",
+        "locked",
+        "unlocked",
+        "milestoned",
+        "demilestoned",
+    }
+)
+NON_ACTIONABLE_PULL_REQUEST_REVIEW_ACTIONS: frozenset[str] = frozenset({"edited"})
+NON_ACTIONABLE_CHECK_RUN_ACTIONS: frozenset[str] = frozenset({"requested_action"})
 
 
 def installation_id_from_queue(queue_name: str) -> str:
@@ -97,6 +113,8 @@ async def pr_event(pr: PullRequestEvent) -> list[WebhookEvent]:
     """
     Trigger evaluation of modified PR.
     """
+    if pr.action in NON_ACTIONABLE_PULL_REQUEST_ACTIONS:
+        return []
     return [
         WebhookEvent(
             repo_owner=pr.repository.owner.login,
@@ -104,6 +122,9 @@ async def pr_event(pr: PullRequestEvent) -> list[WebhookEvent]:
             pull_request_number=pr.number,
             target_name=pr.pull_request.base.ref,
             installation_id=str(pr.installation.id),
+            head_sha=pr.pull_request.head.sha
+            if pr.pull_request.head is not None
+            else None,
         )
     ]
 
@@ -112,6 +133,8 @@ def check_run(check_run_event: CheckRunEvent) -> list[WebhookEvent]:
     """
     Trigger evaluation of all PRs included in check run.
     """
+    if check_run_event.action in NON_ACTIONABLE_CHECK_RUN_ACTIONS:
+        return []
     # Prevent an infinite loop when we update our check run
     if check_run_event.check_run.name == queries.CHECK_RUN_NAME:
         return []
@@ -127,6 +150,7 @@ def check_run(check_run_event: CheckRunEvent) -> list[WebhookEvent]:
                 pull_request_number=pr.number,
                 target_name=pr.base.ref,
                 installation_id=str(check_run_event.installation.id),
+                head_sha=check_run_event.check_run.head_sha,
             )
         )
     return events
@@ -191,6 +215,7 @@ async def status_event(status_event: StatusEvent) -> list[WebhookEvent]:
                         pull_request_number=pr.number,
                         target_name=pr.base.ref,
                         installation_id=str(installation_id),
+                        head_sha=status_event.sha,
                     )
                 )
 
@@ -226,6 +251,11 @@ async def pr_review(
     # potentially approve it again.
     if (
         isinstance(review, PullRequestReviewEvent)
+        and review.action in NON_ACTIONABLE_PULL_REQUEST_REVIEW_ACTIONS
+    ):
+        return []
+    if (
+        isinstance(review, PullRequestReviewEvent)
         and review.review is not None
         and review.review.user is not None
         and review.review.user.login == conf.GITHUB_APP_NAME + "[bot]"
@@ -238,6 +268,9 @@ async def pr_review(
             pull_request_number=review.pull_request.number,
             target_name=review.pull_request.base.ref,
             installation_id=str(review.installation.id),
+            head_sha=review.pull_request.head.sha
+            if review.pull_request.head is not None
+            else None,
         )
     ]
 
@@ -415,6 +448,10 @@ class WebhookEvent(BaseModel):
     pull_request_number: int
     installation_id: str
     target_name: str
+    head_sha: Optional[str] = None
+
+    def webhook_queue_member(self) -> str:
+        return super().json(exclude_none=True)
 
     def get_merge_queue_name(self) -> str:
         return get_merge_queue_name(self)
@@ -424,6 +461,15 @@ class WebhookEvent(BaseModel):
 
     def get_webhook_queue_name(self) -> str:
         return get_webhook_queue_name(self)
+
+    def get_latest_webhook_head_sha_key(self) -> str:
+        return (
+            f"{WEBHOOK_LATEST_HEAD_SHA_PREFIX}{self.installation_id}:"
+            f"{self.repo_owner}/{self.repo_name}#{self.pull_request_number}"
+        )
+
+    def merge_queue_member(self) -> str:
+        return super().json(exclude={"head_sha"}, exclude_none=True)
 
     def __hash__(self) -> int:
         return (
@@ -453,7 +499,7 @@ async def process_webhook_event(
     webhook_event = WebhookEvent.parse_raw(webhook_event_json[1])
     is_active_merging = (
         await redis_bot.get(webhook_event.get_merge_target_queue_name())
-        == webhook_event.json().encode()
+        == webhook_event.merge_queue_member().encode()
     )
     await record_debug_event(
         stage="evaluation_queue",
@@ -468,8 +514,43 @@ async def process_webhook_event(
             "target_branch": webhook_event.target_name,
             "score": webhook_event_json[2],
             "is_active_merging": is_active_merging,
+            "head_sha": webhook_event.head_sha,
         },
     )
+
+    if webhook_event.head_sha is not None:
+        latest_head_sha = await redis_bot.get(
+            webhook_event.get_latest_webhook_head_sha_key()
+        )
+        latest_head_sha_str = (
+            _decode_redis_text(latest_head_sha) if latest_head_sha else None
+        )
+        if (
+            latest_head_sha_str is not None
+            and latest_head_sha_str != webhook_event.head_sha
+        ):
+            log.info(
+                "skip evaluation for stale webhook event",
+                number=webhook_event.pull_request_number,
+                queued_head_sha=webhook_event.head_sha,
+                latest_head_sha=latest_head_sha_str,
+            )
+            await record_debug_event(
+                stage="evaluation",
+                event_type="pr_evaluation_skipped_stale_sha",
+                message="Skipped evaluation because a newer head SHA was already queued",
+                installation_id=webhook_event.installation_id,
+                owner=webhook_event.repo_owner,
+                repo=webhook_event.repo_name,
+                pr_number=webhook_event.pull_request_number,
+                queue_name=queue_name,
+                details={
+                    "target_branch": webhook_event.target_name,
+                    "queued_head_sha": webhook_event.head_sha,
+                    "latest_head_sha": latest_head_sha_str,
+                },
+            )
+            return
 
     # Skip the full evaluation cycle (GitHub API call + mergeable check +
     # redundant approve/queue) if this PR is already sitting in the merge
@@ -479,7 +560,7 @@ async def process_webhook_event(
     # check-run changes are processed.
     if not is_active_merging:
         merge_queue_score = await redis_bot.zscore(
-            webhook_event.get_merge_queue_name(), webhook_event.json()
+            webhook_event.get_merge_queue_name(), webhook_event.merge_queue_member()
         )
         if merge_queue_score is not None:
             log.info(
@@ -504,12 +585,14 @@ async def process_webhook_event(
             return
 
     async def dequeue() -> None:
-        await redis_bot.zrem(webhook_event.get_merge_queue_name(), webhook_event.json())
+        await redis_bot.zrem(
+            webhook_event.get_merge_queue_name(), webhook_event.merge_queue_member()
+        )
 
     async def requeue() -> None:
         await redis_bot.zadd(
             webhook_event.get_webhook_queue_name(),
-            {webhook_event.json(): time.time()},
+            {webhook_event.webhook_queue_member(): time.time()},
             nx=True,
         )
 
@@ -594,7 +677,7 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
     webhook_event = WebhookEvent.parse_raw(value)
     target_name = webhook_event.get_merge_target_queue_name()
     # mark this PR as being merged currently. we check this elsewhere to set proper status codes
-    await redis_bot.set(target_name, webhook_event.json())
+    await redis_bot.set(target_name, webhook_event.merge_queue_member())
     await redis_bot.set(target_name + ":time", str(score))
     await record_debug_event(
         stage="merge_queue",
@@ -613,12 +696,14 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
     )
 
     async def dequeue() -> None:
-        await redis_bot.zrem(webhook_event.get_merge_queue_name(), webhook_event.json())
+        await redis_bot.zrem(
+            webhook_event.get_merge_queue_name(), webhook_event.merge_queue_member()
+        )
 
     async def requeue() -> None:
         await redis_bot.zadd(
             webhook_event.get_webhook_queue_name(),
-            {webhook_event.json(): time.time()},
+            {webhook_event.webhook_queue_member(): time.time()},
             nx=True,
         )
 
@@ -765,9 +850,15 @@ class RedisWebhookQueue:
         add :event: to webhook queue
         """
         queue_name = get_webhook_queue_name(event)
+        if event.head_sha is not None:
+            await redis_bot.set(
+                event.get_latest_webhook_head_sha_key(),
+                event.head_sha,
+                ex=ONE_DAY,
+            )
         async with redis_bot.pipeline(transaction=True) as pipe:
             pipe.sadd(WEBHOOK_QUEUE_NAMES, queue_name)
-            pipe.zadd(queue_name, {event.json(): time.time()}, nx=True)
+            pipe.zadd(queue_name, {event.webhook_queue_member(): time.time()}, nx=True)
             pipe.zcard(queue_name)
             results = await pipe.execute()
         inserted = bool(results[1]) if len(results) > 1 else None
@@ -790,6 +881,7 @@ class RedisWebhookQueue:
             queue_name=queue_name,
             details={
                 "target_branch": event.target_name,
+                "head_sha": event.head_sha,
                 "queue_depth": queue_depth,
                 "inserted": inserted,
             },
@@ -819,11 +911,13 @@ class RedisWebhookQueue:
             if first:
                 # place at front of queue. To allow us to always place this PR at
                 # the front, we should not pass only_if_not_exists.
-                pipe.zadd(queue_name, {event.json(): 1.0})
+                pipe.zadd(queue_name, {event.merge_queue_member(): 1.0})
             else:
                 # use only_if_not_exists to prevent changing queue positions on new
                 # webhook events.
-                pipe.zadd(queue_name, {event.json(): time.time()}, nx=True)
+                pipe.zadd(
+                    queue_name, {event.merge_queue_member(): time.time()}, nx=True
+                )
             pipe.zrange(queue_name, 0, 1000, withscores=True)
             results = await pipe.execute()
         log = logger.bind(
@@ -839,7 +933,9 @@ class RedisWebhookQueue:
         kvs = sorted(
             ((key, value) for key, value in zrange_results), key=lambda x: x[1]
         )
-        position = find_position((key for key, value in kvs), event.json().encode())
+        position = find_position(
+            (key for key, value in kvs), event.merge_queue_member().encode()
+        )
         inserted = bool(results[3]) if len(results) > 3 else None
         await record_debug_event(
             stage="merge_queue",
@@ -852,6 +948,7 @@ class RedisWebhookQueue:
             queue_name=queue_name,
             details={
                 "target_branch": event.target_name,
+                "head_sha": event.head_sha,
                 "queue_depth": len(zrange_results),
                 "inserted": inserted,
                 "position": position,

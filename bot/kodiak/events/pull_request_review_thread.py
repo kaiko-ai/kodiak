@@ -1,3 +1,5 @@
+from typing import Optional
+
 import pydantic
 
 from kodiak.events.base import GithubEvent
@@ -7,9 +9,15 @@ class Ref(pydantic.BaseModel):
     ref: str
 
 
+class HeadRef(pydantic.BaseModel):
+    ref: str
+    sha: Optional[str] = None
+
+
 class PullRequest(pydantic.BaseModel):
     number: int
     base: Ref
+    head: Optional[HeadRef] = None
 
 
 class Owner(pydantic.BaseModel):
