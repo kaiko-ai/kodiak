@@ -44,10 +44,36 @@ MERGE_QUEUE_BY_INSTALL_PREFIX = "merge_queue_by_install:"
 WEBHOOK_QUEUE_NAMES = "kodiak_webhook_queue_names"
 QUEUE_PUBSUB_INGEST = "kodiak:pubsub:ingest"
 WEBHOOK_LATEST_HEAD_SHA_PREFIX = "kodiak:webhook_latest_head_sha:"
+NOLABEL_CACHE_PREFIX = "kodiak:nolabel:"
+NOLABEL_CACHE_TTL = int(timedelta(days=1).total_seconds())
 
 
 def get_ingest_queue(installation_id: int) -> str:
     return f"kodiak:ingest:{installation_id}"
+
+
+def _nolabel_cache_key(install: str, owner: str, repo: str, number: int) -> str:
+    return f"{NOLABEL_CACHE_PREFIX}{install}:{owner}/{repo}#{number}"
+
+
+async def set_nolabel_cache(install: str, owner: str, repo: str, number: int) -> None:
+    """Cache that a PR was skipped because it lacks the automerge label."""
+    await redis_bot.set(
+        _nolabel_cache_key(install, owner, repo, number),
+        b"1",
+        ex=NOLABEL_CACHE_TTL,
+    )
+
+
+async def check_nolabel_cache(install: str, owner: str, repo: str, number: int) -> bool:
+    """Return True if we've cached that this PR lacks the automerge label."""
+    result = await redis_bot.get(_nolabel_cache_key(install, owner, repo, number))
+    return result is not None
+
+
+async def clear_nolabel_cache(install: str, owner: str, repo: str, number: int) -> None:
+    """Invalidate the no-automerge-label cache for a PR."""
+    await redis_bot.delete(_nolabel_cache_key(install, owner, repo, number))
 
 
 RETRY_RATE_SECONDS = 2
@@ -116,6 +142,15 @@ async def pr_event(pr: PullRequestEvent) -> list[WebhookEvent]:
     """
     if pr.action in NON_ACTIONABLE_PULL_REQUEST_ACTIONS:
         return []
+    # Invalidate the no-automerge-label cache when labels change so that the
+    # next evaluation performs the full GitHub API check.
+    if pr.action in ("labeled", "unlabeled"):
+        await clear_nolabel_cache(
+            install=str(pr.installation.id),
+            owner=pr.repository.owner.login,
+            repo=pr.repository.name,
+            number=pr.number,
+        )
     return [
         WebhookEvent(
             repo_owner=pr.repository.owner.login,
@@ -605,6 +640,32 @@ async def process_webhook_event(
 
     async def queue_for_merge(*, first: bool) -> Optional[int]:
         return await webhook_queue.enqueue_for_repo(event=webhook_event, first=first)
+
+    # Skip the full evaluation cycle if we've previously cached that this PR
+    # lacks the automerge label.  The cache is invalidated when a
+    # `pull_request` webhook with action `labeled` or `unlabeled` arrives.
+    if not is_active_merging and await check_nolabel_cache(
+        install=webhook_event.installation_id,
+        owner=webhook_event.repo_owner,
+        repo=webhook_event.repo_name,
+        number=webhook_event.pull_request_number,
+    ):
+        log.info(
+            "skip evaluation for cached no-automerge-label",
+            number=webhook_event.pull_request_number,
+        )
+        await record_debug_event(
+            stage="evaluation",
+            event_type="pr_evaluation_skipped_nolabel_cache",
+            message="Skipped evaluation because PR was cached as missing the automerge label",
+            installation_id=webhook_event.installation_id,
+            owner=webhook_event.repo_owner,
+            repo=webhook_event.repo_name,
+            pr_number=webhook_event.pull_request_number,
+            queue_name=queue_name,
+            details={"target_branch": webhook_event.target_name},
+        )
+        return
 
     log.info("evaluate pr for webhook event")
     await record_debug_event(

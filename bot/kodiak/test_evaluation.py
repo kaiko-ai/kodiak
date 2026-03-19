@@ -164,6 +164,11 @@ class MockApprovePullRequest(BaseMockFunc):
         self.log_call(dict())
 
 
+class MockCacheNoAutomergeLabel(BaseMockFunc):
+    async def __call__(self) -> None:
+        self.log_call(dict())
+
+
 class MockRequeue(BaseMockFunc):
     async def __call__(self) -> None:
         self.log_call(dict())
@@ -191,6 +196,7 @@ class MockRecordDebugEvent(BaseMockFunc):
 class MockPrApi:
     def __init__(self) -> None:
         self.dequeue = MockDequeue()
+        self.cache_no_automerge_label = MockCacheNoAutomergeLabel()
         self.requeue = MockRequeue()
         self.record_debug_event = MockRecordDebugEvent()
         self.set_status = MockSetStatus()

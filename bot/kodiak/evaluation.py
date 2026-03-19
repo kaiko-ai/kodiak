@@ -328,6 +328,8 @@ class PRAPI(Protocol):
 
     async def approve_pull_request(self) -> None: ...
 
+    async def cache_no_automerge_label(self) -> None: ...
+
 
 async def cfg_err(
     api: PRAPI, msg: str, *, markdown_content: Optional[str] = None
@@ -990,6 +992,7 @@ async def mergeable(
             "Removed PR from consideration because the automerge label is missing",
             details={"required_label": config.merge.automerge_label},
         )
+        await api.cache_no_automerge_label()
         await api.dequeue()
         # Update status when "show_missing_automerge_label_message" is enabled or label has been removed while already in merging state
         if config.merge.show_missing_automerge_label_message or merging:

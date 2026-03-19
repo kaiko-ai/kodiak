@@ -365,6 +365,11 @@ class PRV2:
             details=details,
         )
 
+    async def cache_no_automerge_label(self) -> None:
+        from kodiak.queue import set_nolabel_cache
+
+        await set_nolabel_cache(self.install, self.owner, self.repo, self.number)
+
     async def dequeue(self) -> None:
         self.log.info("dequeue")
         await self.record_debug_event(
