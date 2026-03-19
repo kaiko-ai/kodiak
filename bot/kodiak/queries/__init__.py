@@ -17,6 +17,7 @@ from typing import (
     cast,
 )
 
+import httpx
 import jwt
 import pydantic
 import structlog
@@ -976,9 +977,7 @@ class Client:
         # NOTE: We must call `await session.close()` when we are finished with our session.
         # We implement an async context manager this handle this.
         self.session = HttpClient(
-            # infinite timeout to match behavior of old, requests_async http
-            # client. As a backup we have an asyncio timeout of 30 seconds.
-            timeout=None
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
         )
         self.session.headers["Accept"] = (
             "application/vnd.github.antiope-preview+json,application/vnd.github.merge-info-preview+json"
