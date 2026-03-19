@@ -93,9 +93,7 @@ PR_EVALUATION_TIMEOUT_SEC = config("PR_EVALUATION_TIMEOUT_SEC", cast=int, defaul
 # The ingest worker pops raw GitHub webhooks from a Redis list and fans them
 # out to per-PR evaluation queues.  Increasing this prevents a single slow
 # event from blocking all webhook processing for an installation.
-INGEST_CONSUMER_CONCURRENCY = config(
-    "INGEST_CONSUMER_CONCURRENCY", cast=int, default=3
-)
+INGEST_CONSUMER_CONCURRENCY = config("INGEST_CONSUMER_CONCURRENCY", cast=int, default=3)
 
 # Maximum number of consecutive timeout retries before giving up on a PR
 # evaluation and dequeuing it.

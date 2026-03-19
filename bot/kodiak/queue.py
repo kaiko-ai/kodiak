@@ -654,11 +654,15 @@ async def process_webhook_event(
     # `pull_request` webhook with action `labeled` or `unlabeled` arrives.
     # Close events always bypass this cache so that closed PRs are promptly
     # dequeued.
-    if not is_active_merging and not is_close_event and await check_nolabel_cache(
-        install=webhook_event.installation_id,
-        owner=webhook_event.repo_owner,
-        repo=webhook_event.repo_name,
-        number=webhook_event.pull_request_number,
+    if (
+        not is_active_merging
+        and not is_close_event
+        and await check_nolabel_cache(
+            install=webhook_event.installation_id,
+            owner=webhook_event.repo_owner,
+            repo=webhook_event.repo_name,
+            number=webhook_event.pull_request_number,
+        )
     ):
         log.info(
             "skip evaluation for cached no-automerge-label",
