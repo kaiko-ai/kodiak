@@ -32,7 +32,9 @@ def _generate_jwt() -> str:
         exp=int((now + timedelta(minutes=5)).timestamp()),
         iss=conf.GITHUB_APP_ID,
     )
-    token: bytes = pyjwt.encode(payload=payload, key=conf.PRIVATE_KEY, algorithm="RS256")
+    token: bytes = pyjwt.encode(
+        payload=payload, key=conf.PRIVATE_KEY, algorithm="RS256"
+    )
     return token.decode("utf-8")
 
 
