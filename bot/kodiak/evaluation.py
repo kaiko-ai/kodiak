@@ -64,9 +64,7 @@ from kodiak.queries import (
     TrialExpired,
 )
 from kodiak.text import strip_html_comments_from_markdown
-
-# TODO(chdsbd): We could make an API request to `/app` on start to get this information, but this is pretty simple.
-KODIAK_LOGIN = app_config.GITHUB_APP_NAME
+from kodiak import app_identity
 
 logger = structlog.get_logger()
 
@@ -927,7 +925,9 @@ async def mergeable(
         # and we have not previously given an approval, approve the PR.
         sorted_reviews = sorted(bot_reviews, key=lambda x: x.createdAt)
         kodiak_reviews = [
-            review for review in sorted_reviews if review.author.login == KODIAK_LOGIN
+            review
+            for review in sorted_reviews
+            if review.author.login == app_identity.graphql_login()
         ]
         status = review_status(kodiak_reviews)
         if status != PRReviewState.APPROVED:
