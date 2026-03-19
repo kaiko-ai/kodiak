@@ -20,10 +20,15 @@ class PullRequest(pydantic.BaseModel):
     draft: bool = False
 
 
+class CheckRunApp(pydantic.BaseModel):
+    id: int
+
+
 class CheckRun(pydantic.BaseModel):
     name: str
     head_sha: Optional[str] = None
     pull_requests: List[PullRequest]
+    app: Optional[CheckRunApp] = None
 
 
 class Owner(pydantic.BaseModel):

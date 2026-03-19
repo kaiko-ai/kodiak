@@ -18,6 +18,7 @@ from typing_extensions import Literal, Protocol
 
 from kodiak import (
     app_config as conf,
+    app_identity,
     queries,
 )
 from kodiak.debug_history import record_debug_event, summarize_webhook_payload
@@ -135,8 +136,12 @@ def check_run(check_run_event: CheckRunEvent) -> list[WebhookEvent]:
     """
     if check_run_event.action in NON_ACTIONABLE_CHECK_RUN_ACTIONS:
         return []
-    # Prevent an infinite loop when we update our check run
-    if check_run_event.check_run.name == queries.CHECK_RUN_NAME:
+    # Prevent an infinite loop when we update our own check run.
+    # Prefer matching by app_id (robust) with a name fallback.
+    if (
+        check_run_event.check_run.app is not None
+        and str(check_run_event.check_run.app.id) == conf.GITHUB_APP_ID
+    ) or check_run_event.check_run.name == queries.CHECK_RUN_NAME:
         return []
     events = []
     for pr in check_run_event.check_run.pull_requests:
@@ -260,7 +265,7 @@ async def pr_review(
         isinstance(review, PullRequestReviewEvent)
         and review.review is not None
         and review.review.user is not None
-        and review.review.user.login == conf.GITHUB_APP_NAME + "[bot]"
+        and review.review.user.login == app_identity.bot_login()
     ):
         return []
     return [

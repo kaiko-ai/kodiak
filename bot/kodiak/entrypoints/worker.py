@@ -12,7 +12,10 @@ import pydantic
 import sentry_sdk
 import structlog
 
-from kodiak import app_config as conf
+from kodiak import (
+    app_config as conf,
+    app_identity,
+)
 from kodiak.assertions import assert_never
 from kodiak.debug_history import record_debug_event, summarize_webhook_payload
 from kodiak.logging import configure_logging
@@ -138,6 +141,11 @@ async def ingest_queue_starter(
 
 
 async def main() -> NoReturn:
+    # Resolve the app's own identity (slug, bot login) from the GitHub API
+    # before processing any events.  This prevents mis-configurations of
+    # GITHUB_APP_NAME from causing infinite approval/check-run loops.
+    app_identity.init()
+
     queue = RedisWebhookQueue()
     await queue.create()
 
