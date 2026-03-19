@@ -1581,16 +1581,16 @@ async def test_mergeable_pull_request_need_test_commit_need_update_pr_not_open()
     # this test is nearly identical to
     # test_mergeable_pull_request_need_test_commit_need_update, except our pull
     # request state is MERGED or CLOSED instead of OPEN.
+    # With the early-exit optimization, MERGED/CLOSED PRs are now dequeued
+    # immediately at the top of mergeable() without going through status
+    # checks or blocking title logic.
     for index, pull_request_state in enumerate(
         (PullRequestState.MERGED, PullRequestState.CLOSED)
     ):
         pull_request.state = pull_request_state
         await mergeable(api=api, config=config, pull_request=pull_request)
-        assert api.set_status.call_count == index + 1
-        assert (
-            "cannot merge (title matches merge.blocking_title_regex"
-            in api.set_status.calls[0]["msg"]
-        )
+        # Early exit: dequeue happens before any set_status call.
+        assert api.set_status.call_count == 0
         assert api.dequeue.call_count == index + 1
         assert api.trigger_test_commit.call_count == 0
         assert api.requeue.call_count == 0

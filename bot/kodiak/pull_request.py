@@ -79,6 +79,7 @@ async def evaluate_pr(
     poll_start_time: float | None = None
     last_poll_reason: str = ""
     cycle_count = 0
+    timeout_retry_count = 0
     start_time = time.monotonic()
     log = log.bind(owner=owner, repo=repo, number=number, merging=merging)
     await record_debug_history_event(
@@ -104,7 +105,7 @@ async def evaluate_pr(
                     requeue_callback=requeue_callback,
                     queue_for_merge_callback=queue_for_merge_callback,
                 ),
-                timeout=60,
+                timeout=conf.PR_EVALUATION_TIMEOUT_SEC,
             )
             try:
                 if pr is None:
@@ -139,8 +140,9 @@ async def evaluate_pr(
                         skippable_check_timeout=skippable_check_timeout,
                         api_call_errors=api_call_errors,
                         api_call_retries_remaining=api_call_retries_remaining,
+                        head_exists=pr.event.head_exists,
                     ),
-                    timeout=60,
+                    timeout=conf.PR_EVALUATION_TIMEOUT_SEC,
                 )
                 duration_ms = int((time.monotonic() - start_time) * 1000)
                 log.info(
@@ -295,17 +297,37 @@ async def evaluate_pr(
                 )
             return
         except asyncio.TimeoutError:
-            # On timeout we add the PR to the back of the queue to try again.
-            log.warning("mergeable_timeout", exc_info=True)
+            timeout_retry_count += 1
+            backoff_sec = 5 * (2 ** (timeout_retry_count - 1))  # 5, 10, 20
+            log.warning(
+                "mergeable_timeout",
+                exc_info=True,
+                retry=timeout_retry_count,
+                max_retries=conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES,
+                backoff_sec=backoff_sec,
+            )
             await record_debug_history_event(
                 stage="evaluation",
                 event_type="evaluation_timeout",
-                message="PR evaluation timed out and will be requeued",
+                message="PR evaluation timed out",
                 installation_id=install,
                 owner=owner,
                 repo=repo,
                 pr_number=number,
+                details={
+                    "retry": timeout_retry_count,
+                    "max_retries": conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES,
+                    "backoff_sec": backoff_sec,
+                },
             )
+            if timeout_retry_count >= conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES:
+                log.warning(
+                    "timeout_retry_exhausted",
+                    retries=timeout_retry_count,
+                )
+                await dequeue_callback()
+                return
+            await asyncio.sleep(backoff_sec)
             await requeue_callback()
 
 

@@ -84,6 +84,23 @@ MERGE_QUEUE_POLL_TIMEOUT_SEC = config(
     "MERGE_QUEUE_POLL_TIMEOUT_SEC", cast=int, default=300
 )
 
+# Timeout (seconds) for a single get_pr() or mergeable() call inside the PR
+# evaluation loop.  If GitHub is slow to respond, the evaluation is aborted
+# and the PR is requeued.
+PR_EVALUATION_TIMEOUT_SEC = config("PR_EVALUATION_TIMEOUT_SEC", cast=int, default=60)
+
+# Number of concurrent ingest worker coroutines per installation queue.
+# The ingest worker pops raw GitHub webhooks from a Redis list and fans them
+# out to per-PR evaluation queues.  Increasing this prevents a single slow
+# event from blocking all webhook processing for an installation.
+INGEST_CONSUMER_CONCURRENCY = config("INGEST_CONSUMER_CONCURRENCY", cast=int, default=3)
+
+# Maximum number of consecutive timeout retries before giving up on a PR
+# evaluation and dequeuing it.
+PR_EVALUATION_MAX_TIMEOUT_RETRIES = config(
+    "PR_EVALUATION_MAX_TIMEOUT_RETRIES", cast=int, default=3
+)
+
 # For GitHub Enterprise, the v3 API root has the form:
 # http(s)://[hostname]/api/v3, instead of https://api.github.com.
 GITHUB_V3_API_ROOT = config("GITHUB_V3_API_ROOT", default="https://api.github.com")

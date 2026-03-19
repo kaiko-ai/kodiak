@@ -645,6 +645,7 @@ async def mergeable(
     api_call_errors: Sequence[APICallRetry],
     subscription: Optional[Subscription],
     app_id: Optional[str] = None,
+    head_exists: bool = True,
 ) -> None:
     # TODO(chdsbd): Use structlog bind_contextvars to automatically set useful context (install id, repo, pr number).
     log = logger.bind(number=pull_request.number, url=pull_request.url)
@@ -722,6 +723,53 @@ async def mergeable(
     # if our app_id from the environment matches the configuration.
     if config.app_id is not None and config.app_id != app_id:
         log.info("missing required app_id")
+        await api.dequeue()
+        return
+
+    # Fast-exit for PRs that are already merged or closed.  Checking early
+    # avoids running through label checks, auto-approve, paywall, etc. for
+    # PRs that can never be merged.
+    if pull_request.state == PullRequestState.MERGED:
+        log.info(
+            "pull request merged (early exit). config.merge.delete_branch_on_merge=%r",
+            config.merge.delete_branch_on_merge,
+        )
+        await record_decision(
+            "merged_early_exit",
+            "PR is already merged; dequeuing immediately",
+        )
+        await api.dequeue()
+        if (
+            not config.merge.delete_branch_on_merge
+            or pull_request.isCrossRepository
+            or repository.delete_branch_on_merge
+        ):
+            return
+        pr_count = await api.pull_requests_for_ref(ref=pull_request.headRefName)
+        if pr_count is None or pr_count > 0:
+            log.info(
+                "skipping branch deletion because of dependent PRs", pr_count=pr_count
+            )
+            return
+        await api.delete_branch(branch_name=pull_request.headRefName)
+        return
+
+    if pull_request.state == PullRequestState.CLOSED:
+        log.info("pull request closed (early exit)")
+        await record_decision(
+            "closed_early_exit",
+            "PR is closed; dequeuing immediately",
+        )
+        await api.dequeue()
+        return
+
+    if not head_exists:
+        log.info("head branch no longer exists (early exit)")
+        await record_decision(
+            "head_deleted_early_exit",
+            "Head branch was deleted; dequeuing immediately",
+        )
+        await set_status("⚠️ head branch no longer exists, dequeuing")
         await api.dequeue()
         return
 
@@ -1078,32 +1126,9 @@ async def mergeable(
         await block_merge(api, pull_request, f"reviews requested: {names!r}")
         return
 
-    if pull_request.state == PullRequestState.MERGED:
-        log.info(
-            "pull request merged. config.merge.delete_branch_on_merge=%r",
-            config.merge.delete_branch_on_merge,
-        )
-        await api.dequeue()
-        if (
-            not config.merge.delete_branch_on_merge
-            or pull_request.isCrossRepository
-            or repository.delete_branch_on_merge
-        ):
-            return
-        pr_count = await api.pull_requests_for_ref(ref=pull_request.headRefName)
-        # if we couldn't access the dependent PR count or we have dependent PRs
-        # we will abort deleting this branch.
-        if pr_count is None or pr_count > 0:
-            log.info(
-                "skipping branch deletion because of dependent PRs", pr_count=pr_count
-            )
-            return
-        await api.delete_branch(branch_name=pull_request.headRefName)
-        return
-
-    if pull_request.state == PullRequestState.CLOSED:
-        await api.dequeue()
-        return
+    # NOTE: MERGED and CLOSED checks are now handled at the top of
+    # mergeable() for faster dequeuing.  The only path that reaches here is
+    # OPEN PRs.
 
     if pull_request.mergeStateStatus == MergeStateStatus.UNSTABLE:
         # TODO(chdsbd): This status means that the pr is mergeable but has failing

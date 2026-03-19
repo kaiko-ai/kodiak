@@ -105,5 +105,6 @@ async def test_pr_event_keeps_actionable_pull_request_actions() -> None:
             pull_request_number=123,
             installation_id="42",
             target_name="main",
+            action="synchronize",
         )
     ]
