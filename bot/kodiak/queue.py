@@ -161,6 +161,7 @@ async def pr_event(pr: PullRequestEvent) -> list[WebhookEvent]:
             head_sha=pr.pull_request.head.sha
             if pr.pull_request.head is not None
             else None,
+            action=pr.action,
         )
     ]
 
@@ -491,6 +492,9 @@ class WebhookEvent(BaseModel):
     installation_id: str
     target_name: str
     head_sha: Optional[str] = None
+    # Webhook action (e.g. "closed", "opened").  Used to fast-track close
+    # events past the merge-queue and nolabel-cache skip optimizations.
+    action: Optional[str] = None
 
     def webhook_queue_member(self) -> str:
         return super().json(exclude_none=True)
@@ -511,7 +515,7 @@ class WebhookEvent(BaseModel):
         )
 
     def merge_queue_member(self) -> str:
-        return super().json(exclude={"head_sha"}, exclude_none=True)
+        return super().json(exclude={"head_sha", "action"}, exclude_none=True)
 
     def __hash__(self) -> int:
         return (
@@ -600,7 +604,11 @@ async def process_webhook_event(
     # it reaches the head of the queue.  We still allow evaluations for
     # the PR that is *actively* being merged so that status updates and
     # check-run changes are processed.
-    if not is_active_merging:
+    # We also allow "closed" events through so that a closed PR is
+    # promptly removed from the merge queue instead of waiting until it
+    # reaches the head.
+    is_close_event = webhook_event.action == "closed"
+    if not is_active_merging and not is_close_event:
         merge_queue_score = await redis_bot.zscore(
             webhook_event.get_merge_queue_name(), webhook_event.merge_queue_member()
         )
@@ -644,7 +652,9 @@ async def process_webhook_event(
     # Skip the full evaluation cycle if we've previously cached that this PR
     # lacks the automerge label.  The cache is invalidated when a
     # `pull_request` webhook with action `labeled` or `unlabeled` arrives.
-    if not is_active_merging and await check_nolabel_cache(
+    # Close events always bypass this cache so that closed PRs are promptly
+    # dequeued.
+    if not is_active_merging and not is_close_event and await check_nolabel_cache(
         install=webhook_event.installation_id,
         owner=webhook_event.repo_owner,
         repo=webhook_event.repo_name,

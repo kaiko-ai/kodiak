@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from asyncio.tasks import Task
-from typing import NoReturn
+from typing import Dict, List, NoReturn
 
 import pydantic
 import sentry_sdk
@@ -77,7 +77,7 @@ async def work_ingest_queue(queue: WebhookQueueProtocol, queue_name: str) -> NoR
                     payload=parsed_event.payload,
                     delivery_id=parsed_event.delivery_id,
                 ),
-                timeout=60,
+                timeout=conf.PR_EVALUATION_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
             log.warning("handle_webhook_event timed out")
@@ -115,8 +115,23 @@ class PubsubIngestQueueSchema(pydantic.BaseModel):
     installation_id: int
 
 
+def _start_ingest_workers(
+    ingest_workers: dict[str, list[Task[NoReturn]]],
+    queue: RedisWebhookQueue,
+    queue_name: str,
+) -> None:
+    """Ensure `conf.INGEST_CONSUMER_CONCURRENCY` tasks are running for the
+    given ingest queue.  Reuses any still-alive tasks from a previous call."""
+    tasks = list(ingest_workers.get(queue_name, []))
+    while len(tasks) < conf.INGEST_CONSUMER_CONCURRENCY:
+        tasks.append(
+            asyncio.create_task(work_ingest_queue(queue, queue_name=queue_name))
+        )
+    ingest_workers[queue_name] = tasks
+
+
 async def ingest_queue_starter(
-    ingest_workers: dict[str, Task[NoReturn]], queue: RedisWebhookQueue
+    ingest_workers: dict[str, list[Task[NoReturn]]], queue: RedisWebhookQueue
 ) -> None:
     """
     Listen on Redis Pubsub and start queue worker if we don't have one already.
@@ -134,9 +149,7 @@ async def ingest_queue_starter(
         ).installation_id
         queue_name = get_ingest_queue(installation_id)
         if queue_name not in ingest_workers:
-            ingest_workers[queue_name] = asyncio.create_task(
-                work_ingest_queue(queue, queue_name=queue_name)
-            )
+            _start_ingest_workers(ingest_workers, queue, queue_name)
             log.info("started new task")
 
 
@@ -149,7 +162,7 @@ async def main() -> NoReturn:
     queue = RedisWebhookQueue()
     await queue.create()
 
-    ingest_workers = dict()
+    ingest_workers: Dict[str, List[Task[NoReturn]]] = dict()  # type: ignore[assignment]
 
     ingest_queue_names = await redis_bot.smembers(INGEST_QUEUE_NAMES)
     log = logger.bind(task="main_worker")
@@ -158,13 +171,12 @@ async def main() -> NoReturn:
         queue_name = queue_name_bytes.decode()
         if queue_name not in ingest_workers:
             log.info("start ingest_queue_worker", queue_name=queue_name)
-            ingest_workers[queue_name] = asyncio.create_task(
-                work_ingest_queue(queue, queue_name=queue_name)
-            )
+            _start_ingest_workers(ingest_workers, queue, queue_name)
 
     log.info(
         "worker_startup_summary",
         ingest_queue_count=len(ingest_queue_names),
+        ingest_consumer_concurrency=conf.INGEST_CONSUMER_CONCURRENCY,
         webhook_consumer_concurrency=conf.WEBHOOK_CONSUMER_CONCURRENCY,
         merge_queue_poll_timeout_sec=conf.MERGE_QUEUE_POLL_TIMEOUT_SEC,
     )
@@ -177,17 +189,18 @@ async def main() -> NoReturn:
         # Health check the various tasks and recreate them if necessary.
         # There's probably a cleaner way to do this.
         await asyncio.sleep(0.25)
-        for queue_name, worker_task in ingest_workers.items():
-            if worker_task is None or not worker_task.done():
-                continue
-            logger.warning("worker_task_restart", kind="ingest")
-            # task failed. record result and restart
-            exception = worker_task.exception()
-            logger.info("exception", excep=exception)
-            sentry_sdk.capture_exception(exception)
-            ingest_workers[queue_name] = asyncio.create_task(
-                work_ingest_queue(queue, queue_name=queue_name)
-            )
+        for queue_name, worker_tasks in ingest_workers.items():
+            for i, worker_task in enumerate(worker_tasks):
+                if worker_task is None or not worker_task.done():
+                    continue
+                logger.warning("worker_task_restart", kind="ingest", slot=i)
+                # task failed. record result and restart
+                exception = worker_task.exception()
+                logger.info("exception", excep=exception)
+                sentry_sdk.capture_exception(exception)
+                worker_tasks[i] = asyncio.create_task(
+                    work_ingest_queue(queue, queue_name=queue_name)
+                )
         for task_meta, cur_task in queue.all_tasks():
             if not cur_task.done():
                 continue
