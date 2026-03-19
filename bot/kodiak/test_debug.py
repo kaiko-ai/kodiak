@@ -165,7 +165,7 @@ def test_debug_queues_html_content(mock_redis: AsyncMock, client: TestClient) ->
     assert "text/html" in res.headers["content-type"]
     assert "Kodiak Debug Console" in res.text
     assert "Merge Queues" in res.text
-    assert "Recent PR Timelines" in res.text
+    assert "PR Timelines" in res.text
 
 
 @patch("kodiak.entrypoints.debug.redis_bot")

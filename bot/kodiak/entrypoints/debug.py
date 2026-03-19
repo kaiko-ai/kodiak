@@ -644,10 +644,25 @@ STAT_COLORS: dict[str, str] = {
 
 def _render_summary_cards(summary: dict[str, Any]) -> str:
     cards = [
-        ("Merge Queues", summary["merge_queue_count"], "accent", f"{summary['merge_queue_active_count']} active"),
+        (
+            "Merge Queues",
+            summary["merge_queue_count"],
+            "accent",
+            f"{summary['merge_queue_active_count']} active",
+        ),
         ("Queued PRs", summary["merge_queue_pending_prs"], "green", "waiting to merge"),
-        ("Eval Events", summary["webhook_queue_pending_events"], "yellow", f"{summary['webhook_queue_count']} queues"),
-        ("Ingest Queue", summary["ingest_queue_pending_events"], "purple", f"{summary['ingest_queue_count']} queues"),
+        (
+            "Eval Events",
+            summary["webhook_queue_pending_events"],
+            "yellow",
+            f"{summary['webhook_queue_count']} queues",
+        ),
+        (
+            "Ingest Queue",
+            summary["ingest_queue_pending_events"],
+            "purple",
+            f"{summary['ingest_queue_count']} queues",
+        ),
         ("PR Timelines", summary["recent_pr_count"], "cyan", "tracked recently"),
         ("Debug Events", summary["recent_event_count"], "muted", "in buffer"),
     ]
@@ -669,9 +684,7 @@ def _render_merge_pipeline(queue: dict[str, Any]) -> str:
     target = queue.get("current_target")
     nodes: list[str] = []
     if target:
-        pr_link = _gh_link(
-            f"#{target['pr_number']}", owner, repo, target["pr_number"]
-        )
+        pr_link = _gh_link(f"#{target['pr_number']}", owner, repo, target["pr_number"])
         nodes.append(
             f'<div class="pipeline-node merging">'
             f'<span class="pipeline-dot"></span>'
@@ -789,7 +802,11 @@ def _render_queue_cards(
                 )
                 for ev in queue.get("pending_events", [])
             )
-            body = f'<ul class="pr-list">{pr_rows}</ul>' if pr_rows else '<div class="empty-state">No pending evaluations</div>'
+            body = (
+                f'<ul class="pr-list">{pr_rows}</ul>'
+                if pr_rows
+                else '<div class="empty-state">No pending evaluations</div>'
+            )
             busy_cls = "pill-active" if queue["size"] else "pill-idle"
             busy_label = "Busy" if queue["size"] else "Idle"
             cards.append(
@@ -811,10 +828,13 @@ def _render_queue_cards(
             )
         else:
             ingest_rows = "".join(
-                _render_ingest_row(ev)
-                for ev in queue.get("pending_events", [])
+                _render_ingest_row(ev) for ev in queue.get("pending_events", [])
             )
-            body = f'<ul class="pr-list">{ingest_rows}</ul>' if ingest_rows else '<div class="empty-state">No pending webhooks</div>'
+            body = (
+                f'<ul class="pr-list">{ingest_rows}</ul>'
+                if ingest_rows
+                else '<div class="empty-state">No pending webhooks</div>'
+            )
             busy_cls = "pill-active" if queue["length"] else "pill-idle"
             busy_label = "Busy" if queue["length"] else "Idle"
             cards.append(
@@ -838,7 +858,11 @@ def _render_queue_cards(
 
 
 def _stage_pill_class(stage: str | None) -> str:
-    return f"pill-{stage}" if stage in ("merge", "decision", "evaluation", "ingest") else "pill-evaluation"
+    return (
+        f"pill-{stage}"
+        if stage in ("merge", "decision", "evaluation", "ingest")
+        else "pill-evaluation"
+    )
 
 
 def _status_pill_class(status: str | None) -> str:
@@ -922,7 +946,9 @@ def _render_timeline_groups(
                 title += f" &mdash; {_gh_link(f'{owner}/{repo}', owner, repo)}"
             event_count = len(group.get("events", []))
             fanout = group.get("fanout_count")
-            fanout_html = f"<span>Fan-out: {_escape(fanout)}</span>" if fanout is not None else ""
+            fanout_html = (
+                f"<span>Fan-out: {_escape(fanout)}</span>" if fanout is not None else ""
+            )
             meta_html = f"""
                 <span>{event_count} event{"s" if event_count != 1 else ""}</span>
                 <span>Delivery: {_escape(group.get("delivery_id") or "n/a")}</span>
@@ -964,7 +990,9 @@ def _render_recent_events(events: list[dict[str, Any]]) -> str:
         else:
             target_html = "-"
         stage = event.get("stage") or "-"
-        time_str = (event.get("ts_iso") or "-").split(" ")[1] if event.get("ts_iso") else "-"
+        time_str = (
+            (event.get("ts_iso") or "-").split(" ")[1] if event.get("ts_iso") else "-"
+        )
         rows.append(
             f"""
             <tr>
