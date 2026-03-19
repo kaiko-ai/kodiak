@@ -143,6 +143,8 @@ def check_run(check_run_event: CheckRunEvent) -> list[WebhookEvent]:
         # filter out pull requests for other repositories
         if pr.base.repo.id != check_run_event.repository.id:
             continue
+        if pr.draft:
+            continue
         events.append(
             WebhookEvent(
                 repo_owner=check_run_event.repository.owner.login,
