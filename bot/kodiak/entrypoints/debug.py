@@ -602,67 +602,155 @@ def _render_json_block(data: Any) -> str:
     return f"<pre>{_escape(json.dumps(data, indent=2, sort_keys=True))}</pre>"
 
 
+def _gh_pr_url(owner: Any, repo: Any, pr_number: Any) -> str | None:
+    if owner and repo and pr_number is not None:
+        return f"https://github.com/{_escape(owner)}/{_escape(repo)}/pull/{_escape(pr_number)}"
+    return None
+
+
+def _gh_repo_url(owner: Any, repo: Any) -> str | None:
+    if owner and repo:
+        return f"https://github.com/{_escape(owner)}/{_escape(repo)}"
+    return None
+
+
+def _gh_link(label: str, owner: Any, repo: Any, pr_number: Any = None) -> str:
+    url = _gh_pr_url(owner, repo, pr_number) or _gh_repo_url(owner, repo)
+    if url:
+        return f'<a href="{url}" target="_blank" rel="noopener">{_escape(label)}</a>'
+    return _escape(label)
+
+
+def _format_age(seconds: float | None) -> str:
+    if seconds is None:
+        return "-"
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    return f"{s // 3600}h {(s % 3600) // 60}m"
+
+
+STAT_COLORS: dict[str, str] = {
+    "accent": "#4da6ff",
+    "green": "#2dd4a8",
+    "yellow": "#f5c542",
+    "purple": "#a78bfa",
+    "cyan": "#22d3ee",
+    "muted": "#8899aa",
+}
+
+
 def _render_summary_cards(summary: dict[str, Any]) -> str:
     cards = [
-        ("Merge Queues", summary["merge_queue_count"]),
-        ("Active Merge Queues", summary["merge_queue_active_count"]),
-        ("Queued PRs", summary["merge_queue_pending_prs"]),
-        ("Eval Queue Events", summary["webhook_queue_pending_events"]),
-        ("Ingest Webhooks", summary["ingest_queue_pending_events"]),
-        ("Recent Debug Events", summary["recent_event_count"]),
-        ("PR Timelines", summary["recent_pr_count"]),
-        ("Webhook Timelines", summary["recent_webhook_count"]),
+        (
+            "Merge Queues",
+            summary["merge_queue_count"],
+            "accent",
+            f"{summary['merge_queue_active_count']} active",
+        ),
+        ("Queued PRs", summary["merge_queue_pending_prs"], "green", "waiting to merge"),
+        (
+            "Eval Events",
+            summary["webhook_queue_pending_events"],
+            "yellow",
+            f"{summary['webhook_queue_count']} queues",
+        ),
+        (
+            "Ingest Queue",
+            summary["ingest_queue_pending_events"],
+            "purple",
+            f"{summary['ingest_queue_count']} queues",
+        ),
+        ("PR Timelines", summary["recent_pr_count"], "cyan", "tracked recently"),
+        ("Debug Events", summary["recent_event_count"], "muted", "in buffer"),
     ]
     return "".join(
         f"""
-        <article class="summary-card">
-            <div class="summary-label">{_escape(label)}</div>
-            <div class="summary-value">{_escape(value)}</div>
+        <article class="stat-card {color}">
+            <div class="stat-label">{_escape(label)}</div>
+            <div class="stat-value c-{color}">{_escape(value)}</div>
+            <div class="stat-sub">{_escape(sub)}</div>
         </article>
         """
-        for label, value in cards
+        for label, value, color, sub in cards
     )
 
 
-def _render_queue_item_list(items: list[dict[str, Any]], *, title_key: str) -> str:
-    if not items:
-        return '<div class="empty-state">No pending items in preview.</div>'
-
-    rendered = []
-    for item in items:
-        title = item.get(title_key) or item.get("raw") or "item"
-        meta_parts = []
-        for label, key in (
-            ("PR", "pr_number"),
-            ("Repo", "repo"),
-            ("Owner", "owner"),
-            ("Target", "target_branch"),
-            ("Age", "age_sec"),
-            ("Event", "event_name"),
-            ("Action", "action"),
-            ("Delivery", "delivery_id"),
-        ):
-            value = item.get(key)
-            if value is None:
-                continue
-            if key == "age_sec":
-                value = f"{value}s"
-            meta_parts.append(
-                f"<span><strong>{_escape(label)}:</strong> {_escape(value)}</span>"
-            )
-        rendered.append(
-            f"""
-            <li class="queue-item">
-                <div class="queue-item-title">{_escape(title)}</div>
-                <div class="meta-line">{"".join(meta_parts)}</div>
-                <details>
-                    <summary>Details</summary>
-                    {_render_json_block(item)}
-                </details>
-            </li>
-            """
+def _render_merge_pipeline(queue: dict[str, Any]) -> str:
+    owner = queue.get("owner") or ""
+    repo = queue.get("repo") or ""
+    target = queue.get("current_target")
+    nodes: list[str] = []
+    if target:
+        pr_link = _gh_link(f"#{target['pr_number']}", owner, repo, target["pr_number"])
+        nodes.append(
+            f'<div class="pipeline-node merging">'
+            f'<span class="pipeline-dot"></span>'
+            f'<span class="pipeline-pr">{pr_link}</span>'
+            f'<span class="pipeline-timer">{_format_age(queue.get("merge_duration_sec"))}</span>'
+            f"</div>"
         )
-    return f'<ul class="queue-item-list">{"".join(rendered)}</ul>'
+    else:
+        nodes.append('<div class="pipeline-node idle-slot">Empty slot</div>')
+    for pr in queue.get("queued_prs", []):
+        pr_link = _gh_link(f"#{pr['pr_number']}", owner, repo, pr["pr_number"])
+        nodes.append('<span class="pipeline-arrow">&rarr;</span>')
+        nodes.append(
+            f'<div class="pipeline-node queued">'
+            f'<span class="pipeline-pr">{pr_link}</span>'
+            f'<span class="pipeline-timer">{_format_age(pr.get("age_sec"))}</span>'
+            f"</div>"
+        )
+    return f'<div class="merge-pipeline">{"".join(nodes)}</div>'
+
+
+def _render_pr_row(
+    item: dict[str, Any], *, position: str, pill_class: str, pill_label: str
+) -> str:
+    owner = item.get("owner") or ""
+    repo = item.get("repo") or ""
+    pr_num = item.get("pr_number")
+    label = f"{owner}/{repo} #{pr_num}" if pr_num else f"{owner}/{repo}"
+    link = _gh_link(label, owner, repo, pr_num)
+    sha = item.get("head_sha") or ""
+    short_sha = sha[:7] if sha else ""
+    branch = item.get("target_branch") or ""
+    age = _format_age(item.get("age_sec"))
+    return f"""
+    <li class="pr-row">
+        <span class="pr-position">{_escape(position)}</span>
+        <div class="pr-info">
+            <div class="pr-title">{link}</div>
+            <span class="pr-sha">{_escape(short_sha)}</span>
+        </div>
+        <span class="pr-branch">{_escape(branch)}</span>
+        <span class="pill {pill_class}">{_escape(pill_label)}</span>
+        <span class="pr-age">{_escape(age)}</span>
+    </li>"""
+
+
+def _render_ingest_row(item: dict[str, Any]) -> str:
+    event_name = item.get("event_name") or "?"
+    action = item.get("action") or ""
+    owner = item.get("owner") or ""
+    repo = item.get("repo") or ""
+    pr_num = item.get("pr_number")
+    target = f"{owner}/{repo}"
+    if pr_num:
+        target += f" #{pr_num}"
+    sender = item.get("sender") or (item.get("delivery_id") or "")[:8]
+    return f"""
+    <li class="pr-row" style="grid-template-columns: 36px 1fr auto auto;">
+        <span class="pr-position">&bull;</span>
+        <div class="pr-info">
+            <div class="pr-title">{_escape(event_name)} <span class="text-secondary">{_escape(action)}</span></div>
+            <div class="pr-sha">{_escape(target)}</div>
+        </div>
+        <span class="pill pill-ingest">{_escape(event_name)}</span>
+        <span class="pr-sha">{_escape(sender)}</span>
+    </li>"""
 
 
 def _render_queue_cards(
@@ -674,98 +762,118 @@ def _render_queue_cards(
     cards = []
     for queue in queues:
         if kind == "merge":
-            preview = _render_queue_item_list(
-                queue["queued_prs"],
-                title_key="pr_number",
+            pipeline = _render_merge_pipeline(queue)
+            pr_rows = "".join(
+                _render_pr_row(
+                    pr,
+                    position=f"#{i + 1}",
+                    pill_class="pill-queued",
+                    pill_label="Queued",
+                )
+                for i, pr in enumerate(queue.get("queued_prs", []))
             )
-            current_target_html = (
-                _render_json_block(queue["current_target"])
-                if queue["current_target"] is not None
-                else '<div class="empty-state">No PR is currently occupying the merge slot.</div>'
-            )
+            pr_list = f'<ul class="pr-list">{pr_rows}</ul>' if pr_rows else ""
+            active_cls = "pill-active" if queue["active"] else "pill-idle"
+            active_label = "Active" if queue["active"] else "Idle"
             cards.append(
                 f"""
                 <article class="queue-card">
-                    <div class="queue-card-head">
-                        <div>
-                            <h3>{_escape(queue.get("owner") or "?")}/{_escape(queue.get("repo") or "?")} / {_escape(queue.get("branch") or "?")}</h3>
-                            <div class="muted">{_escape(queue["name"])}</div>
+                    <div class="queue-card-header">
+                        <div class="queue-card-title">
+                            <h3>{_escape(queue.get("owner") or "?")}/{_escape(queue.get("repo") or "?")} <span class="text-secondary">/ {_escape(queue.get("branch") or "?")}</span></h3>
                         </div>
-                        <span class="pill {"pill-active" if queue["active"] else "pill-idle"}">{"active" if queue["active"] else "idle"}</span>
+                        <div class="queue-card-meta">
+                            <span class="meta-item"><strong>{_escape(queue["size"])}</strong> queued</span>
+                            <span class="pill {active_cls}"><span class="pill-dot"></span> {active_label}</span>
+                        </div>
                     </div>
-                    <div class="meta-grid">
-                        <div><strong>Installation:</strong> {_escape(queue["installation_id"])}</div>
-                        <div><strong>Queued PRs:</strong> {_escape(queue["size"])}</div>
-                        <div><strong>Merging PR:</strong> {_escape(queue.get("merging_pr") or "-")}</div>
-                        <div><strong>Merge Duration:</strong> {_escape(f"{queue['merge_duration_sec']}s" if queue["merge_duration_sec"] is not None else "-")}</div>
-                    </div>
-                    <details open>
-                        <summary>Current Merge Slot</summary>
-                        {current_target_html}
-                    </details>
-                    <details open>
-                        <summary>Queued PR Preview</summary>
-                        {preview}
-                    </details>
+                    {pipeline}
+                    {pr_list}
                 </article>
                 """
             )
         elif kind == "webhook":
-            preview = _render_queue_item_list(
-                queue["pending_events"],
-                title_key="pr_number",
+            pr_rows = "".join(
+                _render_pr_row(
+                    ev,
+                    position="&bull;",
+                    pill_class="pill-evaluation",
+                    pill_label="Pending",
+                )
+                for ev in queue.get("pending_events", [])
             )
+            body = (
+                f'<ul class="pr-list">{pr_rows}</ul>'
+                if pr_rows
+                else '<div class="empty-state">No pending evaluations</div>'
+            )
+            busy_cls = "pill-active" if queue["size"] else "pill-idle"
+            busy_label = "Busy" if queue["size"] else "Idle"
             cards.append(
                 f"""
                 <article class="queue-card">
-                    <div class="queue-card-head">
-                        <div>
-                            <h3>{_escape(queue["name"])}</h3>
-                            <div class="muted">{_escape(queue["description"])}</div>
+                    <div class="queue-card-header">
+                        <div class="queue-card-title">
+                            <h3>Installation {_escape(queue["installation_id"])}</h3>
                         </div>
-                        <span class="pill {"pill-active" if queue["size"] else "pill-idle"}">{"busy" if queue["size"] else "idle"}</span>
+                        <div class="queue-card-meta">
+                            <span class="meta-item"><strong>{_escape(queue["size"])}</strong> pending</span>
+                            <span class="meta-item text-tertiary">Oldest: {_escape(queue.get("oldest_event_iso") or "-")}</span>
+                            <span class="pill {busy_cls}"><span class="pill-dot"></span> {busy_label}</span>
+                        </div>
                     </div>
-                    <div class="meta-grid">
-                        <div><strong>Installation:</strong> {_escape(queue["installation_id"])}</div>
-                        <div><strong>Queued PR evaluations:</strong> {_escape(queue["size"])}</div>
-                        <div><strong>Oldest:</strong> {_escape(queue.get("oldest_event_iso") or "-")}</div>
-                        <div><strong>Newest:</strong> {_escape(queue.get("newest_event_iso") or "-")}</div>
-                    </div>
-                    <details open>
-                        <summary>Pending PR Evaluation Preview</summary>
-                        {preview}
-                    </details>
+                    {body}
                 </article>
                 """
             )
         else:
-            preview = _render_queue_item_list(
-                queue["pending_events"],
-                title_key="event_name",
+            ingest_rows = "".join(
+                _render_ingest_row(ev) for ev in queue.get("pending_events", [])
             )
+            body = (
+                f'<ul class="pr-list">{ingest_rows}</ul>'
+                if ingest_rows
+                else '<div class="empty-state">No pending webhooks</div>'
+            )
+            busy_cls = "pill-active" if queue["length"] else "pill-idle"
+            busy_label = "Busy" if queue["length"] else "Idle"
             cards.append(
                 f"""
                 <article class="queue-card">
-                    <div class="queue-card-head">
-                        <div>
-                            <h3>{_escape(queue["name"])}</h3>
-                            <div class="muted">{_escape(queue["description"])}</div>
+                    <div class="queue-card-header">
+                        <div class="queue-card-title">
+                            <h3>Installation {_escape(queue["installation_id"])}</h3>
                         </div>
-                        <span class="pill {"pill-active" if queue["length"] else "pill-idle"}">{"busy" if queue["length"] else "idle"}</span>
+                        <div class="queue-card-meta">
+                            <span class="meta-item"><strong>{_escape(queue["length"])}</strong> pending</span>
+                            <span class="pill {busy_cls}"><span class="pill-dot"></span> {busy_label}</span>
+                        </div>
                     </div>
-                    <div class="meta-grid">
-                        <div><strong>Installation:</strong> {_escape(queue["installation_id"])}</div>
-                        <div><strong>Queued raw webhooks:</strong> {_escape(queue["length"])}</div>
-                    </div>
-                    <details open>
-                        <summary>Pending Webhook Preview</summary>
-                        {preview}
-                    </details>
+                    {body}
                 </article>
                 """
             )
 
     return "".join(cards)
+
+
+def _stage_pill_class(stage: str | None) -> str:
+    return (
+        f"pill-{stage}"
+        if stage in ("merge", "decision", "evaluation", "ingest")
+        else "pill-evaluation"
+    )
+
+
+def _status_pill_class(status: str | None) -> str:
+    mapping = {
+        "merging": "pill-merging",
+        "queued": "pill-queued",
+        "waiting": "pill-waiting",
+        "waiting_for_ci": "pill-waiting",
+        "blocked": "pill-blocked",
+    }
+    return mapping.get(status or "", "pill-idle")
 
 
 def _render_timeline_event(event: dict[str, Any]) -> str:
@@ -778,15 +886,19 @@ def _render_timeline_event(event: dict[str, Any]) -> str:
             {_render_json_block(details)}
         </details>
         """
+    stage = event.get("stage") or "evaluation"
     return f"""
-    <li class="timeline-entry">
-        <div class="timeline-entry-head">
-            <span class="pill pill-stage">{_escape(event.get("stage") or "?")}</span>
-            <code>{_escape(event.get("event_type") or "?")}</code>
-            <span class="muted">{_escape(event.get("ts_iso") or "-")}</span>
+    <li class="timeline-step stage-{_escape(stage)}">
+        <div class="timeline-step-time">{_escape((event.get("ts_iso") or "-").split(" ")[1] if event.get("ts_iso") else "-")}</div>
+        <div class="timeline-step-dot"></div>
+        <div class="timeline-step-content">
+            <div class="timeline-step-type">
+                <span class="pill {_stage_pill_class(stage)}" style="font-size:0.62rem;padding:2px 7px;">{_escape(stage)}</span>
+                {_escape(event.get("event_type") or "?")}
+            </div>
+            <div class="timeline-step-msg">{_escape(event.get("message") or "")}</div>
+            {details_html}
         </div>
-        <div class="timeline-message">{_escape(event.get("message") or "")}</div>
-        {details_html}
     </li>
     """
 
@@ -803,51 +915,58 @@ def _render_timeline_groups(
     rendered = []
     for group in groups:
         if title_builder == "pr":
-            title = (
-                f"{group.get('owner')}/{group.get('repo')} #{group.get('pr_number')}"
+            owner = group.get("owner") or ""
+            repo = group.get("repo") or ""
+            pr_num = group.get("pr_number")
+            title_label = f"{owner}/{repo} #{pr_num}"
+            title = _gh_link(title_label, owner, repo, pr_num)
+            status = group.get("latest_status")
+            status_html = (
+                f'<span class="pill {_status_pill_class(status)}">{_escape(status)}</span>'
+                if status
+                else ""
             )
-            meta = [
-                f"<span><strong>Latest:</strong> {_escape(group.get('latest_ts_iso') or '-')}</span>",
-                f"<span><strong>Decisions:</strong> {_escape(group.get('decision_count') or 0)}</span>",
-            ]
-            if group.get("latest_status"):
-                meta.append(
-                    f"<span><strong>Latest Status:</strong> {_escape(group['latest_status'])}</span>"
-                )
+            event_count = len(group.get("events", []))
+            meta_html = f"""
+                {status_html}
+                <span>{event_count} event{"s" if event_count != 1 else ""}</span>
+                <span>{_escape((group.get("latest_ts_iso") or "-").split(" ")[1] if group.get("latest_ts_iso") else "-")}</span>
+            """
         else:
             title = (
-                f"{group.get('event_name') or 'webhook'}"
+                f"{_escape(group.get('event_name') or 'webhook')}"
                 f" / {_escape(group.get('action') or '-')}"
             )
-            meta = [
-                f"<span><strong>Latest:</strong> {_escape(group.get('latest_ts_iso') or '-')}</span>",
-                f"<span><strong>Delivery:</strong> {_escape(group.get('delivery_id') or 'n/a')}</span>",
-            ]
-            if group.get("owner") and group.get("repo"):
-                meta.append(
-                    f"<span><strong>Repo:</strong> {_escape(group['owner'])}/{_escape(group['repo'])}</span>"
-                )
-            if group.get("pr_number") is not None:
-                meta.append(
-                    f"<span><strong>PR:</strong> {_escape(group['pr_number'])}</span>"
-                )
-            if group.get("fanout_count") is not None:
-                meta.append(
-                    f"<span><strong>Fan-out:</strong> {_escape(group['fanout_count'])}</span>"
-                )
+            owner = group.get("owner")
+            repo = group.get("repo")
+            pr_num = group.get("pr_number")
+            if owner and repo and pr_num is not None:
+                title += f" &mdash; {_gh_link(f'{owner}/{repo}#{pr_num}', owner, repo, pr_num)}"
+            elif owner and repo:
+                title += f" &mdash; {_gh_link(f'{owner}/{repo}', owner, repo)}"
+            event_count = len(group.get("events", []))
+            fanout = group.get("fanout_count")
+            fanout_html = (
+                f"<span>Fan-out: {_escape(fanout)}</span>" if fanout is not None else ""
+            )
+            meta_html = f"""
+                <span>{event_count} event{"s" if event_count != 1 else ""}</span>
+                <span>Delivery: {_escape(group.get("delivery_id") or "n/a")}</span>
+                {fanout_html}
+            """
 
         rendered.append(
             f"""
             <article class="timeline-card">
-                <div class="queue-card-head">
-                    <div>
-                        <h3>{title}</h3>
-                    </div>
+                <div class="timeline-card-header">
+                    <h4>{title}</h4>
+                    <div class="timeline-card-meta">{meta_html}</div>
                 </div>
-                <div class="meta-line">{"".join(meta)}</div>
-                <ol class="timeline-list">
-                    {"".join(_render_timeline_event(event) for event in group["events"])}
-                </ol>
+                <div class="timeline-body">
+                    <ul class="timeline-steps">
+                        {"".join(_render_timeline_event(event) for event in group["events"])}
+                    </ul>
+                </div>
             </article>
             """
         )
@@ -861,36 +980,38 @@ def _render_recent_events(events: list[dict[str, Any]]) -> str:
 
     rows = []
     for event in events:
-        target = "-"
-        if (
-            event.get("owner")
-            and event.get("repo")
-            and event.get("pr_number") is not None
-        ):
-            target = f"{event['owner']}/{event['repo']}#{event['pr_number']}"
-        elif event.get("owner") and event.get("repo"):
-            target = f"{event['owner']}/{event['repo']}"
+        owner = event.get("owner")
+        repo = event.get("repo")
+        pr_num = event.get("pr_number")
+        if owner and repo and pr_num is not None:
+            target_html = _gh_link(f"{owner}/{repo}#{pr_num}", owner, repo, pr_num)
+        elif owner and repo:
+            target_html = _gh_link(f"{owner}/{repo}", owner, repo)
+        else:
+            target_html = "-"
+        stage = event.get("stage") or "-"
+        time_str = (
+            (event.get("ts_iso") or "-").split(" ")[1] if event.get("ts_iso") else "-"
+        )
         rows.append(
             f"""
             <tr>
-                <td>{_escape(event.get("ts_iso") or "-")}</td>
-                <td><code>{_escape(event.get("stage") or "-")}</code></td>
+                <td class="col-time">{_escape(time_str)}</td>
+                <td><span class="pill {_stage_pill_class(event.get("stage"))}" style="font-size:0.62rem;padding:2px 7px;">{_escape(stage)}</span></td>
                 <td><code>{_escape(event.get("event_type") or "-")}</code></td>
-                <td>{_escape(target)}</td>
-                <td>{_escape(event.get("queue_name") or "-")}</td>
-                <td>{_escape(event.get("message") or "-")}</td>
+                <td class="col-target">{target_html}</td>
+                <td class="col-message" title="{_escape(event.get("message") or "")}">{_escape(event.get("message") or "-")}</td>
             </tr>
             """
         )
     return f"""
-    <table>
+    <table class="event-table">
         <thead>
             <tr>
-                <th>Timestamp</th>
+                <th>Time</th>
                 <th>Stage</th>
                 <th>Type</th>
                 <th>Target</th>
-                <th>Queue</th>
                 <th>Message</th>
             </tr>
         </thead>
@@ -912,210 +1033,182 @@ def _render_html(data: dict[str, Any]) -> str:
     <meta http-equiv="refresh" content="30">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
+        *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
         :root {{
-            --bg: #f5efe7;
-            --surface: #fffaf4;
-            --surface-strong: #fff;
-            --ink: #1f2a30;
-            --muted: #6d7a80;
-            --border: #d7ccc0;
-            --accent: #127475;
-            --accent-2: #e67e22;
-            --accent-3: #bc4b51;
-            --idle: #90a4ae;
-            --shadow: 0 14px 40px rgba(31, 42, 48, 0.08);
+            --bg: #0a0e14;
+            --surface: #131920;
+            --surface-raised: #1a2230;
+            --surface-overlay: #1e2a38;
+            --border: #243044;
+            --border-subtle: #1a2535;
+            --ink: #e2eaf3;
+            --ink-secondary: #8899aa;
+            --ink-tertiary: #576878;
+            --accent: #4da6ff;
+            --accent-subtle: rgba(77, 166, 255, 0.12);
+            --green: #2dd4a8;
+            --green-subtle: rgba(45, 212, 168, 0.12);
+            --yellow: #f5c542;
+            --yellow-subtle: rgba(245, 197, 66, 0.12);
+            --red: #ff6b6b;
+            --red-subtle: rgba(255, 107, 107, 0.12);
+            --purple: #a78bfa;
+            --purple-subtle: rgba(167, 139, 250, 0.12);
+            --orange: #fb923c;
+            --orange-subtle: rgba(251, 146, 60, 0.12);
+            --cyan: #22d3ee;
+            --cyan-subtle: rgba(34, 211, 238, 0.12);
+            --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px;
+            --shadow: 0 2px 8px rgba(0,0,0,0.2), 0 12px 40px rgba(0,0,0,0.15);
+            --font-mono: 'SF Mono', 'JetBrains Mono', Menlo, Monaco, Consolas, monospace;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif;
+            --transition: 180ms cubic-bezier(0.4, 0, 0.2, 1);
         }}
-        * {{ box-sizing: border-box; }}
+        html {{ scroll-behavior: smooth; }}
         body {{
-            margin: 0;
-            font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-            background:
-                radial-gradient(circle at top right, rgba(230, 126, 34, 0.18), transparent 28%),
-                linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
+            font-family: var(--font-sans);
+            background: var(--bg);
             color: var(--ink);
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
         }}
         main {{
-            width: min(1500px, calc(100vw - 32px));
+            width: min(1400px, calc(100vw - 40px));
             margin: 0 auto;
-            padding: 24px 0 64px;
+            padding: 28px 0 64px;
         }}
-        h1, h2, h3 {{ margin: 0; }}
-        h1 {{
-            font-size: clamp(2rem, 4vw, 3.4rem);
-            letter-spacing: -0.04em;
-        }}
-        h2 {{
-            font-size: 1.2rem;
-            margin-bottom: 14px;
-        }}
-        h3 {{
-            font-size: 1rem;
-            margin-bottom: 6px;
-        }}
+        a {{ color: var(--accent); text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        h1, h2, h3, h4 {{ margin: 0; }}
+        h1 {{ font-size: clamp(1.6rem, 3vw, 2.2rem); font-weight: 700; letter-spacing: -0.03em; }}
+        h2 {{ font-size: 1.05rem; font-weight: 600; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }}
+        h2 .count {{ font-size: 0.72rem; background: var(--surface-overlay); color: var(--ink-secondary); padding: 2px 8px; border-radius: 999px; font-weight: 500; }}
+        h3 {{ font-size: 0.9rem; font-weight: 600; }}
+        h4 {{ font-size: 0.88rem; font-weight: 600; }}
         p {{ margin: 0; }}
-        code {{
-            background: rgba(18, 116, 117, 0.08);
-            padding: 0.12rem 0.35rem;
-            border-radius: 6px;
-        }}
-        pre {{
-            white-space: pre-wrap;
-            word-break: break-word;
-            margin: 10px 0 0;
-            padding: 12px;
-            border-radius: 12px;
-            background: #f3ece4;
-            border: 1px solid var(--border);
-        }}
-        section {{
-            margin-top: 22px;
-            padding: 20px;
-            border-radius: 22px;
-            background: rgba(255, 250, 244, 0.88);
-            border: 1px solid rgba(215, 204, 192, 0.8);
-            box-shadow: var(--shadow);
-        }}
-        .hero {{
-            display: grid;
-            gap: 14px;
-            padding: 28px;
-            background: linear-gradient(135deg, rgba(18, 116, 117, 0.08), rgba(230, 126, 34, 0.14));
-        }}
-        .hero-copy {{
-            display: grid;
-            gap: 10px;
-        }}
-        .muted {{ color: var(--muted); }}
-        .summary-grid, .queue-grid, .timeline-grid {{
-            display: grid;
-            gap: 14px;
-        }}
-        .summary-grid {{
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-        }}
-        .queue-grid, .timeline-grid {{
-            grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-        }}
-        .summary-card, .queue-card, .timeline-card {{
-            background: var(--surface-strong);
-            border: 1px solid var(--border);
-            border-radius: 18px;
-            padding: 16px;
-            box-shadow: var(--shadow);
-        }}
-        .summary-label {{
-            color: var(--muted);
-            font-size: 0.8rem;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-        }}
-        .summary-value {{
-            font-size: 2rem;
-            margin-top: 8px;
-            color: var(--accent);
-            font-weight: 700;
-        }}
-        .queue-card-head {{
-            display: flex;
-            justify-content: space-between;
-            gap: 12px;
-            align-items: flex-start;
-            margin-bottom: 12px;
-        }}
-        .meta-grid {{
-            display: grid;
-            gap: 8px 14px;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            margin-bottom: 10px;
-        }}
-        .meta-line {{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            margin-bottom: 10px;
-            color: var(--muted);
-        }}
-        .pill {{
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            padding: 4px 10px;
-            border-radius: 999px;
-            font-size: 0.78rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-        }}
-        .pill-active {{
-            background: rgba(18, 116, 117, 0.14);
-            color: var(--accent);
-        }}
-        .pill-idle {{
-            background: rgba(144, 164, 174, 0.18);
-            color: #455a64;
-        }}
-        .pill-stage {{
-            background: rgba(230, 126, 34, 0.15);
-            color: var(--accent-2);
-        }}
-        .empty-state {{
-            padding: 14px;
-            border: 1px dashed var(--border);
-            border-radius: 14px;
-            color: var(--muted);
-            background: rgba(255, 255, 255, 0.7);
-        }}
-        details {{
-            margin-top: 10px;
-            border-top: 1px solid rgba(215, 204, 192, 0.8);
-            padding-top: 10px;
-        }}
-        summary {{
-            cursor: pointer;
-            color: var(--accent);
-        }}
-        .queue-item-list, .timeline-list {{
-            margin: 10px 0 0;
-            padding-left: 18px;
-        }}
-        .queue-item, .timeline-entry {{
-            margin-top: 10px;
-        }}
-        .queue-item-title {{
-            font-weight: 700;
-        }}
-        .timeline-entry-head {{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-            align-items: center;
-            margin-bottom: 6px;
-        }}
-        .timeline-message {{
-            font-size: 0.96rem;
-            line-height: 1.45;
-        }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            background: var(--surface-strong);
-            border-radius: 18px;
-            overflow: hidden;
-            box-shadow: var(--shadow);
-        }}
-        th, td {{
-            text-align: left;
-            padding: 12px;
-            border-bottom: 1px solid rgba(215, 204, 192, 0.7);
-            vertical-align: top;
-        }}
-        th {{
-            background: rgba(18, 116, 117, 0.08);
-        }}
+        code {{ background: var(--surface-overlay); padding: 0.15rem 0.4rem; border-radius: 4px; font-family: var(--font-mono); font-size: 0.82rem; }}
+        pre {{ white-space: pre-wrap; word-break: break-word; margin: 10px 0 0; padding: 12px; border-radius: var(--radius-md); background: var(--surface-raised); border: 1px solid var(--border); font-family: var(--font-mono); font-size: 0.78rem; color: var(--ink-secondary); }}
+        section {{ margin-top: 24px; padding: 20px; border-radius: var(--radius-lg); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }}
+        .text-secondary {{ color: var(--ink-secondary); }}
+        .text-tertiary {{ color: var(--ink-tertiary); }}
+
+        /* Hero */
+        .hero {{ padding: 28px; background: linear-gradient(135deg, rgba(77,166,255,0.06), rgba(167,139,250,0.06)); }}
+        .hero-copy {{ display: grid; gap: 8px; }}
+
+        /* Stats */
+        .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 16px; }}
+        .stat-card {{ background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px 16px; position: relative; overflow: hidden; }}
+        .stat-card::after {{ content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; border-radius: 2px 2px 0 0; }}
+        .stat-card.accent::after {{ background: var(--accent); }}
+        .stat-card.green::after {{ background: var(--green); }}
+        .stat-card.yellow::after {{ background: var(--yellow); }}
+        .stat-card.purple::after {{ background: var(--purple); }}
+        .stat-card.cyan::after {{ background: var(--cyan); }}
+        .stat-card.muted::after {{ background: var(--ink-tertiary); }}
+        .stat-label {{ font-size: 0.7rem; color: var(--ink-tertiary); text-transform: uppercase; letter-spacing: 0.07em; font-weight: 500; }}
+        .stat-value {{ font-size: 1.7rem; font-weight: 750; font-variant-numeric: tabular-nums; letter-spacing: -0.04em; line-height: 1.2; }}
+        .stat-value.c-accent {{ color: var(--accent); }}
+        .stat-value.c-green {{ color: var(--green); }}
+        .stat-value.c-yellow {{ color: var(--yellow); }}
+        .stat-value.c-purple {{ color: var(--purple); }}
+        .stat-value.c-cyan {{ color: var(--cyan); }}
+        .stat-value.c-muted {{ color: var(--ink-secondary); }}
+        .stat-sub {{ font-size: 0.74rem; color: var(--ink-tertiary); }}
+
+        /* Queue cards */
+        .queue-grid {{ display: grid; gap: 12px; }}
+        .queue-card {{ background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; transition: border-color var(--transition); }}
+        .queue-card:hover {{ border-color: var(--ink-tertiary); }}
+        .queue-card-header {{ padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-subtle); }}
+        .queue-card-title {{ display: flex; align-items: center; gap: 10px; min-width: 0; }}
+        .queue-card-meta {{ display: flex; align-items: center; gap: 12px; flex-shrink: 0; }}
+        .meta-item {{ font-size: 0.78rem; color: var(--ink-secondary); display: flex; align-items: center; gap: 4px; }}
+        .meta-item strong {{ color: var(--ink); font-weight: 600; }}
+
+        /* Pipeline */
+        .merge-pipeline {{ padding: 14px 18px; background: linear-gradient(90deg, var(--green-subtle), var(--accent-subtle) 35%, transparent 70%); border-bottom: 1px solid var(--border-subtle); display: flex; align-items: center; gap: 0; overflow-x: auto; }}
+        .pipeline-node {{ display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 8px; font-size: 0.82rem; font-weight: 500; white-space: nowrap; flex-shrink: 0; }}
+        .pipeline-node.merging {{ background: var(--green-subtle); border: 1px solid rgba(45,212,168,0.25); color: var(--green); }}
+        .pipeline-node.merging .pipeline-dot {{ width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px rgba(45,212,168,0.5); animation: gp 1.5s ease-in-out infinite; }}
+        @keyframes gp {{ 0%,100% {{ box-shadow: 0 0 8px rgba(45,212,168,0.4); }} 50% {{ box-shadow: 0 0 16px rgba(45,212,168,0.7); }} }}
+        .pipeline-node.queued {{ background: var(--accent-subtle); border: 1px solid rgba(77,166,255,0.15); color: var(--accent); }}
+        .pipeline-node.idle-slot {{ background: var(--surface-raised); border: 1px dashed var(--border); color: var(--ink-tertiary); font-style: italic; }}
+        .pipeline-arrow {{ color: var(--ink-tertiary); flex-shrink: 0; margin: 0 4px; font-size: 0.9rem; opacity: 0.5; }}
+        .pipeline-timer {{ font-family: var(--font-mono); font-size: 0.75rem; opacity: 0.8; }}
+        .pipeline-pr {{ font-weight: 700; }}
+        .pipeline-pr a {{ color: inherit; text-decoration: none; }}
+        .pipeline-pr a:hover {{ text-decoration: underline; }}
+
+        /* Pills */
+        .pill {{ display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }}
+        .pill-dot {{ width: 6px; height: 6px; border-radius: 50%; background: currentColor; }}
+        .pill-merging {{ background: var(--green-subtle); color: var(--green); }}
+        .pill-queued {{ background: var(--accent-subtle); color: var(--accent); }}
+        .pill-waiting {{ background: var(--yellow-subtle); color: var(--yellow); }}
+        .pill-blocked {{ background: var(--red-subtle); color: var(--red); }}
+        .pill-idle {{ background: var(--surface-overlay); color: var(--ink-tertiary); }}
+        .pill-active {{ background: var(--green-subtle); color: var(--green); }}
+        .pill-ingest {{ background: var(--purple-subtle); color: var(--purple); }}
+        .pill-evaluation {{ background: var(--accent-subtle); color: var(--accent); }}
+        .pill-decision {{ background: var(--yellow-subtle); color: var(--yellow); }}
+        .pill-merge {{ background: var(--green-subtle); color: var(--green); }}
+
+        /* PR list rows */
+        .pr-list {{ list-style: none; }}
+        .pr-row {{ display: grid; grid-template-columns: 36px 1fr auto auto auto; align-items: center; gap: 12px; padding: 10px 18px; border-bottom: 1px solid var(--border-subtle); font-size: 0.84rem; transition: background var(--transition); }}
+        .pr-row:last-child {{ border-bottom: none; }}
+        .pr-row:hover {{ background: var(--surface-overlay); }}
+        .pr-position {{ font-family: var(--font-mono); font-weight: 700; color: var(--ink-tertiary); font-size: 0.78rem; text-align: center; }}
+        .pr-info {{ min-width: 0; }}
+        .pr-title {{ font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+        .pr-sha {{ font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-tertiary); }}
+        .pr-branch {{ font-size: 0.76rem; color: var(--ink-secondary); font-family: var(--font-mono); background: var(--surface-overlay); padding: 2px 8px; border-radius: var(--radius-sm); }}
+        .pr-age {{ font-family: var(--font-mono); font-size: 0.8rem; color: var(--ink-secondary); text-align: right; white-space: nowrap; }}
+
+        /* Event table */
+        .event-table {{ width: 100%; border-collapse: separate; border-spacing: 0; background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }}
+        .event-table th {{ background: var(--surface-overlay); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-tertiary); padding: 10px 14px; text-align: left; font-weight: 600; border-bottom: 1px solid var(--border); white-space: nowrap; }}
+        .event-table td {{ padding: 8px 14px; border-bottom: 1px solid var(--border-subtle); font-size: 0.82rem; vertical-align: middle; }}
+        .event-table tr:last-child td {{ border-bottom: none; }}
+        .event-table tbody tr:hover td {{ background: var(--surface-overlay); }}
+        .col-time {{ font-family: var(--font-mono); font-size: 0.76rem; color: var(--ink-tertiary); white-space: nowrap; }}
+        .col-target {{ font-weight: 500; }}
+        .col-message {{ color: var(--ink-secondary); max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+
+        /* Timeline */
+        .timeline-card {{ background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; margin-bottom: 10px; }}
+        .timeline-card-header {{ padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-subtle); }}
+        .timeline-card-meta {{ display: flex; align-items: center; gap: 10px; font-size: 0.76rem; color: var(--ink-tertiary); }}
+        .timeline-body {{ padding: 0; }}
+        .timeline-steps {{ list-style: none; padding: 0; }}
+        .timeline-step {{ display: grid; grid-template-columns: 78px 10px 1fr; gap: 0 10px; padding: 0 16px; min-height: 46px; }}
+        .timeline-step-time {{ font-family: var(--font-mono); font-size: 0.7rem; color: var(--ink-tertiary); text-align: right; padding-top: 13px; }}
+        .timeline-step-dot {{ position: relative; display: flex; flex-direction: column; align-items: center; }}
+        .timeline-step-dot::before {{ content: ''; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); margin-top: 15px; flex-shrink: 0; z-index: 1; }}
+        .timeline-step-dot::after {{ content: ''; width: 2px; flex: 1; background: var(--border); }}
+        .timeline-step:last-child .timeline-step-dot::after {{ display: none; }}
+        .timeline-step.stage-merge .timeline-step-dot::before {{ background: var(--green); }}
+        .timeline-step.stage-decision .timeline-step-dot::before {{ background: var(--yellow); }}
+        .timeline-step.stage-evaluation .timeline-step-dot::before {{ background: var(--accent); }}
+        .timeline-step.stage-ingest .timeline-step-dot::before {{ background: var(--purple); }}
+        .timeline-step-content {{ padding: 10px 0 12px; }}
+        .timeline-step-type {{ font-size: 0.76rem; font-weight: 600; font-family: var(--font-mono); margin-bottom: 2px; display: flex; align-items: center; gap: 6px; }}
+        .timeline-step-msg {{ font-size: 0.8rem; color: var(--ink-secondary); }}
+
+        /* Empty state */
+        .empty-state {{ text-align: center; padding: 32px; color: var(--ink-tertiary); font-size: 0.86rem; border: 1px dashed var(--border); border-radius: var(--radius-md); }}
+
+        /* Details */
+        details {{ margin-top: 8px; }}
+        summary {{ cursor: pointer; color: var(--accent); font-size: 0.82rem; }}
+
         @media (max-width: 720px) {{
             main {{ width: min(100vw - 20px, 100%); }}
-            section, .hero {{ padding: 16px; }}
-            .queue-grid, .timeline-grid {{ grid-template-columns: 1fr; }}
+            section {{ padding: 14px; }}
+            .queue-grid {{ grid-template-columns: 1fr; }}
+            .pr-row {{ grid-template-columns: 28px 1fr auto; }}
+            .pr-branch, .pr-sha {{ display: none; }}
         }}
     </style>
 </head>
@@ -1123,61 +1216,48 @@ def _render_html(data: dict[str, Any]) -> str:
     <main>
         <section class="hero">
             <div class="hero-copy">
-                <p class="muted">Collected at {collected_at}</p>
+                <p class="text-tertiary" style="font-size:0.78rem;">Collected at {collected_at}</p>
                 <h1>Kodiak Debug Console</h1>
-                <p>This view shows live queue state plus a bounded debug history of webhook processing, PR evaluations, status updates, queue moves, and merge decisions.</p>
-                <p class="muted">Scope: {_escape(install_filter)}. Queue preview limit: {_escape(data["filters"]["queue_preview_limit"])}. History limit: {_escape(data["filters"]["history_limit"])}.</p>
+                <p class="text-secondary" style="font-size:0.88rem;">Live queue state + bounded debug history. Scope: {_escape(install_filter)}. Preview limit: {_escape(data["filters"]["queue_preview_limit"])}. History limit: {_escape(data["filters"]["history_limit"])}.</p>
             </div>
-            <div class="summary-grid">
+            <div class="stats-grid">
                 {_render_summary_cards(data["summary"])}
             </div>
         </section>
 
         <section>
-            <h2>How To Read This</h2>
-            <p>{_escape(QUEUE_DEFINITIONS["ingest_queues"])}</p>
-            <p>{_escape(QUEUE_DEFINITIONS["webhook_queues"])}</p>
-            <p>{_escape(QUEUE_DEFINITIONS["merge_queues"])}</p>
-            <p class="muted">{_escape(QUEUE_DEFINITIONS["registry_behavior"])}</p>
-        </section>
-
-        <section>
-            <h2>Merge Queues ({_escape(len(data["merge_queues"]))})</h2>
+            <h2>Merge Queues <span class="count">{_escape(len(data["merge_queues"]))}</span></h2>
             <div class="queue-grid">
                 {_render_queue_cards(data["merge_queues"], kind="merge", empty_message="No merge queues are currently registered.")}
             </div>
         </section>
 
         <section>
-            <h2>PR Evaluation Queues ({_escape(len(data["webhook_queues"]))})</h2>
+            <h2>PR Evaluation Queues <span class="count">{_escape(len(data["webhook_queues"]))}</span></h2>
             <div class="queue-grid">
                 {_render_queue_cards(data["webhook_queues"], kind="webhook", empty_message="No PR evaluation queues are currently registered.")}
             </div>
         </section>
 
         <section>
-            <h2>Raw Webhook Ingest Queues ({_escape(len(data["ingest_queues"]))})</h2>
+            <h2>Ingest Queues <span class="count">{_escape(len(data["ingest_queues"]))}</span></h2>
             <div class="queue-grid">
                 {_render_queue_cards(data["ingest_queues"], kind="ingest", empty_message="No ingest queues are currently registered.")}
             </div>
         </section>
 
         <section>
-            <h2>Recent PR Timelines ({_escape(len(data["pr_timelines"]))})</h2>
-            <div class="timeline-grid">
-                {_render_timeline_groups(data["pr_timelines"], title_builder="pr", empty_message="No recent PR debug history recorded yet.")}
-            </div>
+            <h2>PR Timelines <span class="count">{_escape(len(data["pr_timelines"]))}</span></h2>
+            {_render_timeline_groups(data["pr_timelines"], title_builder="pr", empty_message="No recent PR debug history recorded yet.")}
         </section>
 
         <section>
-            <h2>Recent Webhook Timelines ({_escape(len(data["webhook_timelines"]))})</h2>
-            <div class="timeline-grid">
-                {_render_timeline_groups(data["webhook_timelines"], title_builder="webhook", empty_message="No recent webhook debug history recorded yet.")}
-            </div>
+            <h2>Webhook Timelines <span class="count">{_escape(len(data["webhook_timelines"]))}</span></h2>
+            {_render_timeline_groups(data["webhook_timelines"], title_builder="webhook", empty_message="No recent webhook debug history recorded yet.")}
         </section>
 
         <section>
-            <h2>Recent Debug Events ({_escape(len(data["recent_events"]))})</h2>
+            <h2>Recent Events <span class="count">{_escape(len(data["recent_events"]))}</span></h2>
             {_render_recent_events(data["recent_events"])}
         </section>
     </main>
