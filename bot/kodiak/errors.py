@@ -3,7 +3,8 @@ class RetryForSkippableChecks(Exception):
 
 
 class PollForever(Exception):
-    pass
+    def __init__(self, reason: str = "") -> None:
+        self.reason = reason
 
 
 class ApiCallException(Exception):

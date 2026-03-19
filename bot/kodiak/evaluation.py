@@ -891,7 +891,7 @@ async def mergeable(
             # we don't want to abort the merge if we encounter this status check.
             # Just keep polling!
             if merging:
-                raise PollForever
+                raise PollForever("GitHub mergeability unknown")
 
             await asyncio.sleep(REQUEUE_BACKOFF_SECONDS)
             return
@@ -1279,7 +1279,7 @@ async def mergeable(
             )
             await api.update_branch()
             if merging:
-                raise PollForever
+                raise PollForever("updating branch (update_branch_immediately)")
             return
 
         if merging:
@@ -1288,12 +1288,14 @@ async def mergeable(
                 if need_branch_update:
                     await set_status("⛴ merging PR (updating branch)")
                     await api.update_branch()
-                    raise PollForever
+                    raise PollForever("updating branch")
                 if wait_for_checks:
                     await set_status(
                         f"⛴ merging PR (waiting for status checks: {missing_required_status_checks!r})"
                     )
-                    raise PollForever
+                    raise PollForever(
+                        f"waiting for status checks: {missing_required_status_checks!r}"
+                    )
             # almost the same as the pervious case, but we prioritize status checks
             # over branch updates.
             else:
@@ -1301,11 +1303,13 @@ async def mergeable(
                     await set_status(
                         f"⛴ merging PR (waiting for status checks: {missing_required_status_checks!r})"
                     )
-                    raise PollForever
+                    raise PollForever(
+                        f"waiting for status checks: {missing_required_status_checks!r}"
+                    )
                 if need_branch_update:
                     await set_status("⛴ merging PR (updating branch)")
                     await api.update_branch()
-                    raise PollForever
+                    raise PollForever("updating branch")
 
         # if we reach this point and we don't need to wait for checks or update a branch
         # we've failed to calculate why the PR is blocked. This should _not_ happen

@@ -17,6 +17,7 @@ class Ref(pydantic.BaseModel):
 class PullRequest(pydantic.BaseModel):
     number: int
     base: Ref
+    draft: bool = False
 
 
 class CheckRun(pydantic.BaseModel):

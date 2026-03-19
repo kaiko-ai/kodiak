@@ -77,6 +77,7 @@ async def evaluate_pr(
     api_call_retries_remaining = 5
     api_call_errors = []  # type: list[APICallError]
     poll_start_time: float | None = None
+    last_poll_reason: str = ""
     cycle_count = 0
     start_time = time.monotonic()
     log = log.bind(owner=owner, repo=repo, number=number, merging=merging)
@@ -180,8 +181,10 @@ async def evaluate_pr(
                     )
                     await asyncio.sleep(RETRY_RATE_SECONDS)
                     continue
-            except PollForever:
+            except PollForever as e:
                 cycle_count += 1
+                if e.reason:
+                    last_poll_reason = e.reason
                 if poll_start_time is None:
                     poll_start_time = time.monotonic()
                 elapsed_ms = int((time.monotonic() - poll_start_time) * 1000)
@@ -189,6 +192,7 @@ async def evaluate_pr(
                     "polling",
                     cycle=cycle_count,
                     elapsed_ms=elapsed_ms,
+                    reason=last_poll_reason,
                 )
                 await record_debug_history_event(
                     stage="evaluation",
@@ -202,6 +206,7 @@ async def evaluate_pr(
                         "cycle": cycle_count,
                         "elapsed_ms": elapsed_ms,
                         "merging": merging,
+                        "reason": last_poll_reason,
                     },
                 )
                 if (
@@ -209,15 +214,22 @@ async def evaluate_pr(
                     and (time.monotonic() - poll_start_time)
                     > conf.MERGE_QUEUE_POLL_TIMEOUT_SEC
                 ):
+                    timeout_msg = (
+                        f"⚠️ Timed out waiting in merge queue ({last_poll_reason}). "
+                        "Will retry on next webhook event."
+                        if last_poll_reason
+                        else "⚠️ Timed out waiting in merge queue. Will retry on next webhook event."
+                    )
                     log.warning(
                         "merge_queue_poll_timeout",
                         elapsed_sec=int(time.monotonic() - poll_start_time),
                         cycles=cycle_count,
+                        reason=last_poll_reason,
                     )
                     await record_debug_history_event(
                         stage="evaluation",
                         event_type="merge_queue_poll_timeout",
-                        message="Polling timed out; moving PR out of the merge slot",
+                        message="Polling timed out; dequeuing PR from merge queue",
                         installation_id=install,
                         owner=owner,
                         repo=repo,
@@ -225,10 +237,20 @@ async def evaluate_pr(
                         details={
                             "elapsed_sec": int(time.monotonic() - poll_start_time),
                             "cycles": cycle_count,
+                            "reason": last_poll_reason,
                         },
                     )
+                    # Post a visible status so the user knows what's stuck.
+                    assert pr is not None
+                    await pr.set_status(timeout_msg)
+                    # Dequeue from merge queue but do NOT re-queue to webhook
+                    # queue. This prevents the infinite timeout/re-queue cycle
+                    # where a perpetually-missing required check (e.g. a commit
+                    # status that was never posted on the HEAD commit) blocks
+                    # the entire merge queue.  The PR will be re-evaluated when
+                    # the next natural webhook event fires (check completion,
+                    # push, review, label change, etc.).
                     await dequeue_callback()
-                    await requeue_callback()
                     return
                 await asyncio.sleep(POLL_RATE_SECONDS)
                 continue

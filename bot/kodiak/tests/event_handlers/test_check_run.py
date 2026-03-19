@@ -42,3 +42,34 @@ def test_ignore_external_pull_requests() -> None:
             target_name="main",
         )
     ]
+
+
+def test_ignore_draft_pull_requests() -> None:
+    """
+    Draft PRs should be filtered out at the fanout stage to avoid
+    wasting evaluation cycles on PRs that can't be merged.
+    """
+    repo_id = 554453
+    ready_pr = PullRequest(
+        number=100,
+        base=Ref(ref="main", repo=PullRequestRepository(id=repo_id)),
+        draft=False,
+    )
+    draft_pr = PullRequest(
+        number=200,
+        base=Ref(ref="main", repo=PullRequestRepository(id=repo_id)),
+        draft=True,
+    )
+    event = CheckRunEvent(
+        installation=Installation(id=69039045),
+        check_run=CheckRun(
+            name="ci: test",
+            pull_requests=[ready_pr, draft_pr],
+        ),
+        repository=Repository(
+            id=repo_id, name="cake-api", owner=Owner(login="acme-corp")
+        ),
+    )
+    results = list(check_run(event))
+    assert len(results) == 1
+    assert results[0].pull_request_number == 100
