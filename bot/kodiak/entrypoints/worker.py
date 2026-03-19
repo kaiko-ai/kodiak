@@ -12,7 +12,10 @@ import pydantic
 import sentry_sdk
 import structlog
 
-from kodiak import app_config as conf, app_identity
+from kodiak import (
+    app_config as conf,
+    app_identity,
+)
 from kodiak.assertions import assert_never
 from kodiak.debug_history import record_debug_event, summarize_webhook_payload
 from kodiak.logging import configure_logging

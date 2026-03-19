@@ -13,7 +13,7 @@ import structlog
 import toml
 from typing_extensions import Protocol
 
-from kodiak import app_config, config, messages
+from kodiak import app_config, app_identity, config, messages
 from kodiak.assertions import assert_never
 from kodiak.config import (
     DEFAULT_TITLE_REGEX,
@@ -64,7 +64,6 @@ from kodiak.queries import (
     TrialExpired,
 )
 from kodiak.text import strip_html_comments_from_markdown
-from kodiak import app_identity
 
 logger = structlog.get_logger()
 
