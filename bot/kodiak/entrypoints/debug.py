@@ -621,7 +621,7 @@ def _gh_link(label: str, owner: Any, repo: Any, pr_number: Any = None) -> str:
     return _escape(label)
 
 
-def _format_age(seconds: int | float | None) -> str:
+def _format_age(seconds: float | None) -> str:
     if seconds is None:
         return "-"
     s = int(seconds)
