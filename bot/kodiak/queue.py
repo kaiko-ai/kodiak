@@ -639,10 +639,10 @@ async def process_webhook_event(
             webhook_event.get_merge_queue_name(), webhook_event.merge_queue_member()
         )
 
-    async def requeue() -> None:
+    async def requeue(*, delay_sec: float = 0) -> None:
         await redis_bot.zadd(
             webhook_event.get_webhook_queue_name(),
-            {webhook_event.webhook_queue_member(): time.time()},
+            {webhook_event.webhook_queue_member(): time.time() + delay_sec},
             nx=True,
         )
 
@@ -782,10 +782,10 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
             webhook_event.get_merge_queue_name(), webhook_event.merge_queue_member()
         )
 
-    async def requeue() -> None:
+    async def requeue(*, delay_sec: float = 0) -> None:
         await redis_bot.zadd(
             webhook_event.get_webhook_queue_name(),
-            {webhook_event.webhook_queue_member(): time.time()},
+            {webhook_event.webhook_queue_member(): time.time() + delay_sec},
             nx=True,
         )
 

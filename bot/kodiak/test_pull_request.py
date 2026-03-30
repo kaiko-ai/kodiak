@@ -19,7 +19,12 @@ import kodiak.http as requests
 from kodiak.config import V1, Merge, MergeMethod
 from kodiak.errors import ApiCallException
 from kodiak.http import Request
-from kodiak.pull_request import PRV2, EventInfoResponse, QueueForMergeCallback
+from kodiak.pull_request import (
+    PRV2,
+    EventInfoResponse,
+    QueueForMergeCallback,
+    RequeueCallback,
+)
 from kodiak.queries import (
     BranchProtectionRule,
     Client,
@@ -229,7 +234,7 @@ def create_prv2(
     number: int = 8634,
     dequeue_callback: Callable[[], Awaitable[None]] = noop,
     queue_for_merge_callback: QueueForMergeCallback = noop,
-    requeue_callback: Callable[[], Awaitable[None]] = noop,
+    requeue_callback: RequeueCallback = noop,
     client: Optional[Type[FakeClientProtocol]] = None,
 ) -> PRV2:
     return PRV2(

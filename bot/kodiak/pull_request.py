@@ -27,13 +27,17 @@ RETRY_RATE_SECONDS = 2
 POLL_RATE_SECONDS = 3
 
 
+class RequeueCallback(Protocol):
+    async def __call__(self, *, delay_sec: float = 0) -> None: ...
+
+
 async def get_pr(
     install: str,
     owner: str,
     repo: str,
     number: int,
     dequeue_callback: Callable[[], Awaitable[None]],
-    requeue_callback: Callable[[], Awaitable[None]],
+    requeue_callback: RequeueCallback,
     queue_for_merge_callback: QueueForMergeCallback,
 ) -> Optional[PRV2]:
     log = logger.bind(install=install, owner=owner, repo=repo, number=number)
@@ -68,7 +72,7 @@ async def evaluate_pr(
     number: int,
     merging: bool,
     dequeue_callback: Callable[[], Awaitable[None]],
-    requeue_callback: Callable[[], Awaitable[None]],
+    requeue_callback: RequeueCallback,
     queue_for_merge_callback: QueueForMergeCallback,
     is_active_merging: bool,
     log: structlog.BoundLogger,
@@ -79,7 +83,7 @@ async def evaluate_pr(
     poll_start_time: float | None = None
     last_poll_reason: str = ""
     cycle_count = 0
-    timeout_retry_count = 0
+    timeout_count = 0
     start_time = time.monotonic()
     log = log.bind(owner=owner, repo=repo, number=number, merging=merging)
     await record_debug_history_event(
@@ -297,14 +301,14 @@ async def evaluate_pr(
                 )
             return
         except asyncio.TimeoutError:
-            timeout_retry_count += 1
-            backoff_sec = 5 * (2 ** (timeout_retry_count - 1))  # 5, 10, 20
+            timeout_count += 1
+            backoff_sec = min(10 * (2 ** (timeout_count - 1)), 300)
             log.warning(
                 "mergeable_timeout",
-                exc_info=True,
-                retry=timeout_retry_count,
-                max_retries=conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES,
+                timeout_count=timeout_count,
+                max_timeouts=conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES,
                 backoff_sec=backoff_sec,
+                exc_info=True,
             )
             await record_debug_history_event(
                 stage="evaluation",
@@ -315,20 +319,18 @@ async def evaluate_pr(
                 repo=repo,
                 pr_number=number,
                 details={
-                    "retry": timeout_retry_count,
+                    "retry": timeout_count,
                     "max_retries": conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES,
                     "backoff_sec": backoff_sec,
                 },
             )
-            if timeout_retry_count >= conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES:
+            if not merging and timeout_count >= conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES:
                 log.warning(
-                    "timeout_retry_exhausted",
-                    retries=timeout_retry_count,
+                    "max_evaluation_timeouts_reached",
+                    timeouts=timeout_count,
                 )
-                await dequeue_callback()
                 return
-            await asyncio.sleep(backoff_sec)
-            await requeue_callback()
+            await requeue_callback(delay_sec=backoff_sec)
 
 
 class QueueForMergeCallback(Protocol):
@@ -352,7 +354,7 @@ class PRV2:
         repo: str,
         number: int,
         dequeue_callback: Callable[[], Awaitable[None]],
-        requeue_callback: Callable[[], Awaitable[None]],
+        requeue_callback: RequeueCallback,
         queue_for_merge_callback: QueueForMergeCallback,
         client: Optional[Type[Client]] = None,
     ):
