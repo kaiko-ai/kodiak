@@ -250,7 +250,6 @@ method = "squash"
     )
 
 
-
 @pytest.fixture
 async def setup_redis(github_installation_id: str) -> AsyncGenerator[None, None]:
     host = conf.REDIS_URL.hostname
