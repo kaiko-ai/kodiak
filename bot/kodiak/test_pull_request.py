@@ -206,6 +206,15 @@ def create_client() -> Type[FakeClientProtocol]:
         update_branch = MockUpdateBranch()
         update_ref = MockUpdateRef()
 
+        async def create_notification(
+            self, *args: object, **kwargs: object
+        ) -> requests.Response:
+            return requests.Response(
+                status_code=200,
+                content=b"{}",
+                request=Request(method="POST", url=""),
+            )
+
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
@@ -269,9 +278,10 @@ async def test_pr_v2_merge() -> None:
     assert client.merge_pull_request.call_count == 1
 
 
-async def test_pr_v2_merge_rebase_error() -> None:
+async def test_pr_v2_merge_405_dequeues() -> None:
     """
-    We should raise ApiCallException when we get a bad API response.
+    A 405 from GitHub's merge endpoint should dequeue the PR cleanly
+    instead of raising ApiCallException and retrying.
     """
     client = create_client()
     client.merge_pull_request.response = create_response(
@@ -279,15 +289,17 @@ async def test_pr_v2_merge_rebase_error() -> None:
         status_code=405,
     )
 
-    pr_v2 = create_prv2(client=client)
-    with pytest.raises(ApiCallException) as e:
-        await pr_v2.merge(
-            "squash", commit_title="my title", commit_message="my message"
-        )
+    dequeue_called = False
+
+    async def mock_dequeue() -> None:
+        nonlocal dequeue_called
+        dequeue_called = True
+
+    pr_v2 = create_prv2(client=client, dequeue_callback=mock_dequeue)
+    # Should NOT raise — 405 is handled gracefully
+    await pr_v2.merge("squash", commit_title="my title", commit_message="my message")
     assert client.merge_pull_request.call_count == 1
-    assert e.value.method == "pull_request/merge"
-    assert e.value.status_code == 405
-    assert b"merge-a-pull-request-merge-button" in e.value.response
+    assert dequeue_called
 
 
 async def test_pr_v2_merge_service_unavailable() -> None:

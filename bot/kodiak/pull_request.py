@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Optional, Type
 
+import redis.exceptions
 import structlog
 from typing_extensions import Protocol
 
@@ -257,6 +258,11 @@ async def evaluate_pr(
                     # the next natural webhook event fires (check completion,
                     # push, review, label change, etc.).
                     await dequeue_callback()
+                    # Set a cooldown so the PR doesn't immediately re-enter
+                    # the merge queue on the next webhook event.
+                    from kodiak.queue import set_merge_cooldown
+
+                    await set_merge_cooldown(install, owner, repo, number)
                     return
                 await asyncio.sleep(POLL_RATE_SECONDS)
                 continue
@@ -394,6 +400,13 @@ class PRV2:
 
         await set_nolabel_cache(self.install, self.owner, self.repo, self.number)
 
+    async def check_merge_cooldown(self) -> bool:
+        from kodiak.queue import check_merge_cooldown
+
+        return await check_merge_cooldown(
+            self.install, self.owner, self.repo, self.number
+        )
+
     async def dequeue(self) -> None:
         self.log.info("dequeue")
         await self.record_debug_event(
@@ -422,7 +435,16 @@ class PRV2:
         status check. This detail view is accessible via the "Details" link
         alongside the summary/detail content.
         """
-        if msg == self._last_status_message:
+        from kodiak.queue import check_status_dedup, set_status_dedup
+
+        redis_dedup = False
+        try:
+            redis_dedup = await check_status_dedup(
+                self.install, self.owner, self.repo, self.number, msg
+            )
+        except (OSError, redis.exceptions.RedisError):
+            self.log.debug("status_dedup_check_failed", exc_info=True)
+        if msg == self._last_status_message or redis_dedup:
             self.log.info("set_status_skipped_duplicate", message=msg)
             await self.record_debug_event(
                 stage="status",
@@ -454,6 +476,12 @@ class PRV2:
                 )
             else:
                 self._last_status_message = msg
+                try:
+                    await set_status_dedup(
+                        self.install, self.owner, self.repo, self.number, msg
+                    )
+                except (OSError, redis.exceptions.RedisError):
+                    self.log.debug("status_dedup_set_failed", exc_info=True)
                 await self.record_debug_event(
                     stage="status",
                     event_type="status_set",
@@ -644,13 +672,25 @@ class PRV2:
                 res.raise_for_status()
             except HTTPError as e:
                 if e.response is not None and e.response.status_code == 405:
-                    self.log.info(
-                        "branch is not mergeable. PR likely already merged.", res=res
-                    )
-                else:
                     self.log.warning(
-                        "failed to merge pull request", res=res, exc_info=True
+                        "merge_rejected_405",
+                        res=res,
                     )
+                    await self.record_debug_event(
+                        stage="github_action",
+                        event_type="merge_rejected_405",
+                        message="GitHub rejected merge (405). PR may have been merged externally or is not in a mergeable state.",
+                        details={
+                            "merge_method": merge_method,
+                            "status_code": 405,
+                        },
+                    )
+                    await self.set_status(
+                        "⚠️ GitHub rejected the merge (405). The PR may have been merged externally or is not in a mergeable state."
+                    )
+                    await self.dequeue()
+                    return
+                self.log.warning("failed to merge pull request", res=res, exc_info=True)
                 await self.record_debug_event(
                     stage="github_action",
                     event_type="merge_failed",

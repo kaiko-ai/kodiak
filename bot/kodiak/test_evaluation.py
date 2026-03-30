@@ -169,6 +169,14 @@ class MockCacheNoAutomergeLabel(BaseMockFunc):
         self.log_call(dict())
 
 
+class MockCheckMergeCooldown(BaseMockFunc):
+    response: bool = False
+
+    async def __call__(self) -> bool:
+        self.log_call(dict())
+        return self.response
+
+
 class MockRequeue(BaseMockFunc):
     async def __call__(self) -> None:
         self.log_call(dict())
@@ -211,6 +219,7 @@ class MockPrApi:
         self.queue_for_merge = MockQueueForMerge()
         self.update_branch = MockUpdateBranch()
         self.approve_pull_request = MockApprovePullRequest()
+        self.check_merge_cooldown = MockCheckMergeCooldown()
 
     def get_api_methods(self) -> List[Tuple[str, BaseMockFunc]]:
         cls = type(self)
