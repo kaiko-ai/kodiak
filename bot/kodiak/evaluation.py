@@ -1542,6 +1542,13 @@ branch protection requirements.
             await set_status("merge complete 🎉")
 
     else:
+        # The PR is already being processed by the repo queue consumer —
+        # re-enqueuing would create a duplicate in both :target and ZSET.
+        if is_active_merge:
+            log.info(
+                "skip queue_for_merge: PR is already the active merge target",
+            )
+            return
         if await api.check_merge_cooldown():
             log.info("merge_decision", reason="merge_cooldown_active")
             await record_decision(
@@ -1568,10 +1575,5 @@ branch protection requirements.
             log.warning("couldn't find position for enqueued PR")
             return
         ordinal_position = inflection.ordinalize(position_in_queue + 1)
-        if not is_active_merge:
-            await set_status(f"📦 enqueued for merge (position={ordinal_position})")
-        else:
-            log.info(
-                "not setting status message for enqueued job because is_active_merge=True"
-            )
+        await set_status(f"📦 enqueued for merge (position={ordinal_position})")
     return

@@ -458,17 +458,19 @@ def create_mergeable() -> MergeableType:
 
 async def test_mergeable_abort_is_active_merge() -> None:
     """
-    If we set is_active_merge, that means that in the merge queue the current PR
-    is being updated/merged, so in the frontend we don't want to act on the PR
-    because the PR is being handled.
+    When is_active_merge=True the PR is already being processed by the repo
+    queue consumer (process_repo_queue). The webhook evaluation path must NOT
+    call queue_for_merge — doing so re-inserts the PR into the ZSET after
+    bzpopmin already removed it, causing it to appear in both :target and the
+    queued list.
     """
     api = create_api()
     mergeable = create_mergeable()
     await mergeable(api=api, is_active_merge=True)
-    assert api.queue_for_merge.called is True
+    assert api.queue_for_merge.called is False
 
     assert api.set_status.call_count == 0, (
-        "we don't want to set a status message from the frontend when the PR is being merged"
+        "must not set status from the webhook path while the PR is being merged"
     )
     # verify we haven't tried to update/merge the PR
     assert api.update_branch.called is False
