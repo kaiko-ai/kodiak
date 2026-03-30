@@ -15,7 +15,6 @@ import asyncio
 import logging
 import sys
 import time
-from typing import Any, cast
 
 import sentry_sdk
 import structlog
@@ -23,9 +22,10 @@ from pydantic import BaseModel
 from sentry_sdk.integrations.logging import LoggingIntegration
 
 from kodiak import app_config as conf
+from kodiak._pr_scan_utils import get_login_for_install, is_pr_potentially_actionable
 from kodiak.http import HttpClient
 from kodiak.logging import SentryProcessor, add_request_info_processor
-from kodiak.queries import generate_jwt, get_token_for_install
+from kodiak.queries import get_token_for_install
 from kodiak.queue import WebhookEvent
 from kodiak.redis_client import redis_bot
 
@@ -115,50 +115,7 @@ query ($login: String!) {
 
 """
 
-# Default automerge labels that Kodiak looks for.
-# PRs without any of these labels are skipped during refresh since Kodiak
-# will immediately ignore them anyway (saving ~1.5s of API calls per PR).
-DEFAULT_AUTOMERGE_LABELS = frozenset({"automerge", "dependencies", "version-bump"})
-
-
-def _is_pr_potentially_actionable(
-    pull_request: dict[str, Any],
-    automerge_labels: frozenset[str] = DEFAULT_AUTOMERGE_LABELS,
-) -> bool:
-    """
-    Quick pre-filter to skip PRs that Kodiak will certainly ignore.
-
-    Returns True if the PR *might* be actionable (has a matching label and
-    is not a draft). Returns True on missing data to err on the side of
-    caution.
-    """
-    if pull_request.get("isDraft", False):
-        return False
-
-    labels_node = pull_request.get("labels")
-    if labels_node is None:
-        # If labels data is missing, enqueue to be safe.
-        return True
-
-    label_names = {
-        node["name"] for node in labels_node.get("nodes", []) if "name" in node
-    }
-    return bool(label_names & automerge_labels)
-
-
-async def get_login_for_install(*, http: HttpClient, installation_id: str) -> str:
-    app_token = generate_jwt(
-        private_key=conf.PRIVATE_KEY, app_identifier=conf.GITHUB_APP_ID
-    )
-    res = await http.get(
-        conf.v3_url(f"/app/installations/{installation_id}"),
-        headers=dict(
-            Accept="application/vnd.github.machine-man-preview+json",
-            Authorization=f"Bearer {app_token}",
-        ),
-    )
-    res.raise_for_status()
-    return cast(str, res.json()["account"]["login"])
+_is_pr_potentially_actionable = is_pr_potentially_actionable
 
 
 async def refresh_pull_requests_for_installation(*, installation_id: str) -> None:
