@@ -271,7 +271,6 @@ async def setup_redis(github_installation_id: str) -> AsyncGenerator[None, None]
     await redis_bot.hset(key, "subscription_blocker", "")
     yield
     await redis_bot.delete(key)
-    await redis_bot.close()
 
 
 def msg_to_dict(msg: str) -> Dict[str, str]:
