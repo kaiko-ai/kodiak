@@ -47,6 +47,9 @@ WEBHOOK_LATEST_HEAD_SHA_PREFIX = "kodiak:webhook_latest_head_sha:"
 MERGE_COOLDOWN_PREFIX = "kodiak:merge_cooldown:"
 MERGE_COOLDOWN_TTL = 300  # 5-minute cooldown after merge queue poll timeout
 
+REQUEUE_ATTEMPTS_PREFIX = "kodiak:requeue_attempts:"
+REQUEUE_ATTEMPTS_TTL = 300  # auto-expire so PRs get a fresh chance after 5 minutes
+
 STATUS_DEDUP_PREFIX = "kodiak:last_status:"
 STATUS_DEDUP_TTL = 300  # Only re-post identical status after 5 minutes
 
@@ -118,6 +121,26 @@ async def check_merge_cooldown(
         await redis_bot.get(_merge_cooldown_key(install, owner, repo, number))
         is not None
     )
+
+
+def _requeue_attempts_key(
+    install: str, owner: str, repo: str, number: int, reason: str
+) -> str:
+    return f"{REQUEUE_ATTEMPTS_PREFIX}{install}:{owner}/{repo}#{number}:{reason}"
+
+
+async def increment_requeue_attempts(
+    install: str, owner: str, repo: str, number: int, reason: str
+) -> int:
+    """Increment and return the requeue attempt counter for a PR.
+
+    The counter auto-expires after REQUEUE_ATTEMPTS_TTL seconds so that
+    the PR gets a fresh set of attempts if the GitHub state eventually resolves.
+    """
+    key = _requeue_attempts_key(install, owner, repo, number, reason)
+    count = await redis_bot.incr(key)
+    await redis_bot.expire(key, REQUEUE_ATTEMPTS_TTL)
+    return int(count)
 
 
 def _status_dedup_key(install: str, owner: str, repo: str, number: int) -> str:

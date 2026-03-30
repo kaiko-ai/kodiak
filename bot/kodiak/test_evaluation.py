@@ -10,6 +10,7 @@ from typing_extensions import Protocol
 from kodiak.config import V1, MergeMethod
 from kodiak.errors import GitHubApiInternalServerError, PollForever
 from kodiak.evaluation import (
+    MAX_REQUEUE_ATTEMPTS,
     PRAPI,
     mergeable as mergeable_func,
 )
@@ -177,6 +178,14 @@ class MockCheckMergeCooldown(BaseMockFunc):
         return self.response
 
 
+class MockIncrementRequeueAttempts(BaseMockFunc):
+    response: int = 1
+
+    async def __call__(self, reason: str) -> int:
+        self.log_call(dict(reason=reason))
+        return self.response
+
+
 class MockRequeue(BaseMockFunc):
     async def __call__(self) -> None:
         self.log_call(dict())
@@ -220,6 +229,7 @@ class MockPrApi:
         self.update_branch = MockUpdateBranch()
         self.approve_pull_request = MockApprovePullRequest()
         self.check_merge_cooldown = MockCheckMergeCooldown()
+        self.increment_requeue_attempts = MockIncrementRequeueAttempts()
 
     def get_api_methods(self) -> List[Tuple[str, BaseMockFunc]]:
         cls = type(self)
@@ -2521,6 +2531,7 @@ async def test_unknown_mergeability_no_require_label_triggers() -> None:
     assert api.trigger_test_commit.call_count == 1
     assert api.requeue.call_count == 1
     assert api.dequeue.call_count == 0
+    assert api.increment_requeue_attempts.call_count == 1
 
 
 async def test_unknown_mergeability_with_automerge_label_triggers() -> None:
@@ -2540,3 +2551,103 @@ async def test_unknown_mergeability_with_automerge_label_triggers() -> None:
     assert api.trigger_test_commit.call_count == 1
     assert api.requeue.call_count == 1
     assert api.dequeue.call_count == 0
+
+
+async def test_unknown_mergeability_retry_limit_exceeded() -> None:
+    """
+    When GitHub reports UNKNOWN mergeability and we've exceeded the retry limit,
+    we should dequeue and set a status instead of looping forever.
+    """
+    api = create_api()
+    api.increment_requeue_attempts.response = MAX_REQUEUE_ATTEMPTS + 1
+    mergeable = create_mergeable()
+    pull_request = create_pull_request()
+    pull_request.mergeable = MergeableState.UNKNOWN
+
+    await mergeable(api=api, pull_request=pull_request)
+
+    assert api.trigger_test_commit.call_count == 1
+    assert api.requeue.call_count == 0, "should NOT requeue after limit exceeded"
+    assert api.dequeue.call_count == 1, "should dequeue to stop the loop"
+    assert api.set_status.call_count == 1
+    assert "GitHub cannot determine mergeability" in api.set_status.calls[0]["msg"]
+    assert "GitHub issue" in api.set_status.calls[0]["msg"]
+
+
+async def test_unknown_mergeability_within_retry_limit() -> None:
+    """
+    When GitHub reports UNKNOWN mergeability and we're within the retry limit,
+    normal requeue behavior should continue.
+    """
+    api = create_api()
+    api.increment_requeue_attempts.response = 3
+    mergeable = create_mergeable()
+    pull_request = create_pull_request()
+    pull_request.mergeable = MergeableState.UNKNOWN
+
+    await mergeable(api=api, pull_request=pull_request)
+
+    assert api.trigger_test_commit.call_count == 1
+    assert api.requeue.call_count == 1
+    assert api.dequeue.call_count == 0
+    assert api.set_status.call_count == 0
+
+
+async def test_unknown_mergeability_merging_still_polls_forever() -> None:
+    """
+    When merging=True, the UNKNOWN mergeability path should still raise
+    PollForever (handled by the merge queue timeout) regardless of attempt count.
+    """
+    api = create_api()
+    api.increment_requeue_attempts.response = MAX_REQUEUE_ATTEMPTS + 1
+    mergeable = create_mergeable()
+    pull_request = create_pull_request()
+    pull_request.mergeable = MergeableState.UNKNOWN
+
+    with pytest.raises(PollForever):
+        await mergeable(api=api, pull_request=pull_request, merging=True)
+
+    assert api.trigger_test_commit.call_count == 1
+    # increment_requeue_attempts should NOT be called for merging path
+    assert api.increment_requeue_attempts.call_count == 0
+
+
+async def test_blocked_unknown_retry_limit_exceeded() -> None:
+    """
+    When GitHub reports BLOCKED with no known reason and we've exceeded the
+    retry limit, we should dequeue and set a status instead of looping forever.
+    """
+    api = create_api()
+    api.increment_requeue_attempts.response = MAX_REQUEUE_ATTEMPTS + 1
+    mergeable = create_mergeable()
+    pull_request = create_pull_request()
+    pull_request.mergeStateStatus = MergeStateStatus.BLOCKED
+
+    await mergeable(api=api, pull_request=pull_request)
+
+    assert api.requeue.call_count == 0, "should NOT requeue after limit exceeded"
+    assert api.dequeue.call_count == 1, "should dequeue to stop the loop"
+    assert api.set_status.call_count == 1
+    assert "unknown reason" in api.set_status.calls[0]["msg"]
+    assert "GitHub issue" in api.set_status.calls[0]["msg"]
+    assert api.merge.called is False
+    assert api.queue_for_merge.called is False
+
+
+async def test_blocked_unknown_within_retry_limit() -> None:
+    """
+    When GitHub reports BLOCKED with no known reason and we're within the retry
+    limit, normal requeue behavior should continue.
+    """
+    api = create_api()
+    api.increment_requeue_attempts.response = 2
+    mergeable = create_mergeable()
+    pull_request = create_pull_request()
+    pull_request.mergeStateStatus = MergeStateStatus.BLOCKED
+
+    await mergeable(api=api, pull_request=pull_request)
+
+    assert api.requeue.call_count == 1
+    assert api.dequeue.call_count == 0
+    assert api.set_status.call_count == 1
+    assert "Retrying" in api.set_status.calls[0]["msg"]

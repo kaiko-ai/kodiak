@@ -406,6 +406,13 @@ class PRV2:
             self.install, self.owner, self.repo, self.number
         )
 
+    async def increment_requeue_attempts(self, reason: str) -> int:
+        from kodiak.queue import increment_requeue_attempts
+
+        return await increment_requeue_attempts(
+            self.install, self.owner, self.repo, self.number, reason
+        )
+
     async def dequeue(self) -> None:
         self.log.info("dequeue")
         await self.record_debug_event(
