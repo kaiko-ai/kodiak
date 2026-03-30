@@ -5,7 +5,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Optional, Type
 
-import redis.exceptions
 import structlog
 from typing_extensions import Protocol
 
@@ -435,6 +434,8 @@ class PRV2:
         status check. This detail view is accessible via the "Details" link
         alongside the summary/detail content.
         """
+        from redis.exceptions import RedisError
+
         from kodiak.queue import check_status_dedup, set_status_dedup
 
         redis_dedup = False
@@ -442,7 +443,7 @@ class PRV2:
             redis_dedup = await check_status_dedup(
                 self.install, self.owner, self.repo, self.number, msg
             )
-        except (OSError, redis.exceptions.RedisError):
+        except (OSError, RedisError):
             self.log.debug("status_dedup_check_failed", exc_info=True)
         if msg == self._last_status_message or redis_dedup:
             self.log.info("set_status_skipped_duplicate", message=msg)
@@ -480,7 +481,7 @@ class PRV2:
                     await set_status_dedup(
                         self.install, self.owner, self.repo, self.number, msg
                     )
-                except (OSError, redis.exceptions.RedisError):
+                except (OSError, RedisError):
                     self.log.debug("status_dedup_set_failed", exc_info=True)
                 await self.record_debug_event(
                     stage="status",
