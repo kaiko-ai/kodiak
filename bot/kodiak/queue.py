@@ -45,7 +45,10 @@ WEBHOOK_QUEUE_NAMES = "kodiak_webhook_queue_names"
 QUEUE_PUBSUB_INGEST = "kodiak:pubsub:ingest"
 WEBHOOK_LATEST_HEAD_SHA_PREFIX = "kodiak:webhook_latest_head_sha:"
 NOLABEL_CACHE_PREFIX = "kodiak:nolabel:"
-NOLABEL_CACHE_TTL = int(timedelta(days=1).total_seconds())
+NOLABEL_CACHE_TTL = int(timedelta(hours=1).total_seconds())
+# Short-lived sentinel value written by clear_nolabel_cache to prevent
+# concurrent stale evaluations from re-poisoning the cache.
+NOLABEL_CLEARED_TTL = 120
 
 
 def get_ingest_queue(installation_id: int) -> str:
@@ -57,23 +60,37 @@ def _nolabel_cache_key(install: str, owner: str, repo: str, number: int) -> str:
 
 
 async def set_nolabel_cache(install: str, owner: str, repo: str, number: int) -> None:
-    """Cache that a PR was skipped because it lacks the automerge label."""
-    await redis_bot.set(
-        _nolabel_cache_key(install, owner, repo, number),
-        b"1",
-        ex=NOLABEL_CACHE_TTL,
-    )
+    """Cache that a PR was skipped because it lacks the automerge label.
+
+    Skips the write if a "cleared" sentinel is present — this means a
+    label-change webhook was recently processed and a concurrent stale
+    evaluation should not re-poison the cache.
+    """
+    key = _nolabel_cache_key(install, owner, repo, number)
+    current = await redis_bot.get(key)
+    if current == b"cleared":
+        return
+    await redis_bot.set(key, b"1", ex=NOLABEL_CACHE_TTL)
 
 
 async def check_nolabel_cache(install: str, owner: str, repo: str, number: int) -> bool:
     """Return True if we've cached that this PR lacks the automerge label."""
     result = await redis_bot.get(_nolabel_cache_key(install, owner, repo, number))
-    return result is not None
+    return result == b"1"
 
 
 async def clear_nolabel_cache(install: str, owner: str, repo: str, number: int) -> None:
-    """Invalidate the no-automerge-label cache for a PR."""
-    await redis_bot.delete(_nolabel_cache_key(install, owner, repo, number))
+    """Invalidate the no-automerge-label cache for a PR.
+
+    Sets a short-lived "cleared" sentinel instead of deleting the key.
+    This prevents concurrent stale evaluations (which started before the
+    label change) from re-setting the cache after we clear it.
+    """
+    await redis_bot.set(
+        _nolabel_cache_key(install, owner, repo, number),
+        b"cleared",
+        ex=NOLABEL_CLEARED_TTL,
+    )
 
 
 RETRY_RATE_SECONDS = 2
@@ -453,6 +470,12 @@ async def handle_webhook_event(
         event_parsed = False
 
     for event in generated_events:
+        if action in ("labeled", "unlabeled"):
+            # Remove any stale entry so the labeled/unlabeled event isn't
+            # silently dropped by the NX-dedup in enqueue's ZADD.
+            await redis_bot.zrem(
+                get_webhook_queue_name(event), event.webhook_queue_member()
+            )
         await queue.enqueue(event=event)
 
     await record_debug_event(
