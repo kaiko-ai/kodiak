@@ -1,8 +1,25 @@
+import asyncio
+from typing import Iterator
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from kodiak.queries import clear_config_cache
+from kodiak.redis_client import redis_bot
+
+
+@pytest.fixture(scope="session")
+def event_loop() -> Iterator[asyncio.AbstractEventLoop]:
+    """Create a single event loop for the entire test session.
+
+    Shared across all async tests so that session-scoped Redis connections
+    are cleaned up before the loop closes.
+    """
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    if not loop.is_closed():
+        loop.run_until_complete(redis_bot.close())
+        loop.close()
 
 
 @pytest.fixture(autouse=True)
