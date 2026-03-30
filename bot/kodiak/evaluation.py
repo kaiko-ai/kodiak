@@ -71,6 +71,10 @@ logger = structlog.get_logger()
 # busy-loops (~100ms cycle) that waste API calls.
 REQUEUE_BACKOFF_SECONDS = 5
 
+# Maximum number of self-requeue attempts for unresolvable GitHub states
+# before giving up and waiting for a natural webhook event.
+MAX_REQUEUE_ATTEMPTS = 5
+
 
 def get_body_content(  # noqa: RET503
     *,
@@ -331,6 +335,8 @@ class PRAPI(Protocol):
     async def cache_no_automerge_label(self) -> None: ...
 
     async def check_merge_cooldown(self) -> bool: ...
+
+    async def increment_requeue_attempts(self, reason: str) -> int: ...
 
 
 async def cfg_err(
@@ -928,19 +934,44 @@ async def mergeable(
             # GET on the pull request endpoint.
             await api.trigger_test_commit()
 
+            # we don't want to abort the merge if we encounter this status check.
+            # Just keep polling! The merge queue timeout handles the merging path.
+            # Requeue first so the PR is in the webhook queue as a fallback if
+            # the merge queue poll times out.
+            if merging:
+                await api.requeue()
+                raise PollForever("GitHub mergeability unknown")
+
+            attempts = await api.increment_requeue_attempts("unknown_mergeability")
+            if attempts > MAX_REQUEUE_ATTEMPTS:
+                log.warning(
+                    "unknown mergeability requeue limit exceeded — possible GitHub issue",
+                    attempts=attempts,
+                )
+                await set_status(
+                    "⚠️ GitHub cannot determine mergeability — this is likely a GitHub issue. "
+                    "Kodiak will retry on the next push or status update."
+                )
+                await record_decision(
+                    "unknown_mergeability_limit_exceeded",
+                    "Stopped retrying because GitHub mergeability stayed UNKNOWN "
+                    f"after {attempts} attempts — possible GitHub-side issue",
+                )
+                await api.dequeue()
+                return
+
             # queue the PR for evaluation again in case GitHub doesn't send another
             # webhook for the commit test.
             await api.requeue()
-            log.info("merge_decision", reason="requeued_unknown_mergeability")
+            log.info(
+                "merge_decision",
+                reason="requeued_unknown_mergeability",
+                attempt=attempts,
+            )
             await record_decision(
                 "requeued_unknown_mergeability",
                 "Requeued PR because GitHub reported unknown mergeability",
             )
-
-            # we don't want to abort the merge if we encounter this status check.
-            # Just keep polling!
-            if merging:
-                raise PollForever("GitHub mergeability unknown")
 
             await asyncio.sleep(REQUEUE_BACKOFF_SECONDS)
             return
@@ -1367,12 +1398,42 @@ async def mergeable(
                     http_status_code=0,
                     response=b"",
                 )
+
+            attempts = await api.increment_requeue_attempts("blocked_unknown")
+            if attempts > MAX_REQUEUE_ATTEMPTS:
+                log.warning(
+                    "blocked unknown requeue limit exceeded — possible GitHub issue",
+                    attempts=attempts,
+                    codeowner_review_required=codeowner_review_required,
+                )
+                if not is_active_merge:
+                    await api.set_status(
+                        "⚠️ Merge blocked by GitHub for an unknown reason — "
+                        "this may be a GitHub issue. "
+                        "Kodiak will retry on the next webhook event."
+                    )
+                await record_decision(
+                    "blocked_unknown_limit_exceeded",
+                    "Stopped retrying because GitHub kept reporting a blocked "
+                    f"merge without a known reason after {attempts} attempts "
+                    "— possible GitHub-side issue",
+                    details={
+                        "codeowner_review_required": codeowner_review_required,
+                    },
+                )
+                await api.dequeue()
+                return
+
             if not is_active_merge:
                 await api.set_status(
                     "Retrying (Merging blocked by GitHub requirements)"
                 )
             await api.requeue()
-            log.info("merge_decision", reason="requeued_blocked_unknown")
+            log.info(
+                "merge_decision",
+                reason="requeued_blocked_unknown",
+                attempt=attempts,
+            )
             await record_decision(
                 "requeued_blocked_unknown",
                 "Requeued PR because GitHub reported a blocked merge without a known reason",

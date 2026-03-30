@@ -1,10 +1,9 @@
-import asyncio
 import json
 import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, Iterable, Iterator, cast
+from typing import Any, AsyncGenerator, Dict, Iterable, cast
 
 import pytest
 from pytest_mock import MockFixture
@@ -251,16 +250,6 @@ method = "squash"
     )
 
 
-@pytest.fixture(scope="session")
-def event_loop() -> Iterator[asyncio.AbstractEventLoop]:
-    # from: https://github.com/pytest-dev/pytest-asyncio/issues/38#issuecomment-264418154
-    # fixes 'got Future <Future pending> attached to a different loop' type errors
-    """Create an instance of the default event loop for each test case."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
-
-
 @pytest.fixture
 async def setup_redis(github_installation_id: str) -> AsyncGenerator[None, None]:
     host = conf.REDIS_URL.hostname
@@ -271,7 +260,6 @@ async def setup_redis(github_installation_id: str) -> AsyncGenerator[None, None]
     await redis_bot.hset(key, "subscription_blocker", "")
     yield
     await redis_bot.delete(key)
-    await redis_bot.close()
 
 
 def msg_to_dict(msg: str) -> Dict[str, str]:
@@ -427,6 +415,7 @@ async def test_get_event_info_no_author(
     ] == EXPECTED_ERRORS
 
 
+@requires_redis
 async def test_get_event_info_no_latest_sha(
     api_client: Client,
     mocker: MockFixture,
