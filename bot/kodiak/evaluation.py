@@ -330,6 +330,8 @@ class PRAPI(Protocol):
 
     async def cache_no_automerge_label(self) -> None: ...
 
+    async def check_merge_cooldown(self) -> bool: ...
+
 
 async def cfg_err(
     api: PRAPI, msg: str, *, markdown_content: Optional[str] = None
@@ -1479,6 +1481,16 @@ branch protection requirements.
             await set_status("merge complete 🎉")
 
     else:
+        if await api.check_merge_cooldown():
+            log.info("merge_decision", reason="merge_cooldown_active")
+            await record_decision(
+                "merge_cooldown_active",
+                "Skipped merge queue — cooling down after a recent timeout",
+            )
+            await set_status(
+                "⏳ Waiting after merge queue timeout. Will retry automatically."
+            )
+            return
         log.info("merge_decision", reason="queued_for_merge")
         await record_decision(
             "queued_for_merge",

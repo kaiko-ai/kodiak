@@ -27,13 +27,17 @@ RETRY_RATE_SECONDS = 2
 POLL_RATE_SECONDS = 3
 
 
+class RequeueCallback(Protocol):
+    async def __call__(self, *, delay_sec: float = 0) -> None: ...
+
+
 async def get_pr(
     install: str,
     owner: str,
     repo: str,
     number: int,
     dequeue_callback: Callable[[], Awaitable[None]],
-    requeue_callback: Callable[[], Awaitable[None]],
+    requeue_callback: RequeueCallback,
     queue_for_merge_callback: QueueForMergeCallback,
 ) -> Optional[PRV2]:
     log = logger.bind(install=install, owner=owner, repo=repo, number=number)
@@ -68,7 +72,7 @@ async def evaluate_pr(
     number: int,
     merging: bool,
     dequeue_callback: Callable[[], Awaitable[None]],
-    requeue_callback: Callable[[], Awaitable[None]],
+    requeue_callback: RequeueCallback,
     queue_for_merge_callback: QueueForMergeCallback,
     is_active_merging: bool,
     log: structlog.BoundLogger,
@@ -79,7 +83,7 @@ async def evaluate_pr(
     poll_start_time: float | None = None
     last_poll_reason: str = ""
     cycle_count = 0
-    timeout_retry_count = 0
+    timeout_count = 0
     start_time = time.monotonic()
     log = log.bind(owner=owner, repo=repo, number=number, merging=merging)
     await record_debug_history_event(
@@ -253,6 +257,11 @@ async def evaluate_pr(
                     # the next natural webhook event fires (check completion,
                     # push, review, label change, etc.).
                     await dequeue_callback()
+                    # Set a cooldown so the PR doesn't immediately re-enter
+                    # the merge queue on the next webhook event.
+                    from kodiak.queue import set_merge_cooldown
+
+                    await set_merge_cooldown(install, owner, repo, number)
                     return
                 await asyncio.sleep(POLL_RATE_SECONDS)
                 continue
@@ -297,14 +306,14 @@ async def evaluate_pr(
                 )
             return
         except asyncio.TimeoutError:
-            timeout_retry_count += 1
-            backoff_sec = 5 * (2 ** (timeout_retry_count - 1))  # 5, 10, 20
+            timeout_count += 1
+            backoff_sec = min(10 * (2 ** (timeout_count - 1)), 300)
             log.warning(
                 "mergeable_timeout",
-                exc_info=True,
-                retry=timeout_retry_count,
-                max_retries=conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES,
+                timeout_count=timeout_count,
+                max_timeouts=conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES,
                 backoff_sec=backoff_sec,
+                exc_info=True,
             )
             await record_debug_history_event(
                 stage="evaluation",
@@ -315,20 +324,18 @@ async def evaluate_pr(
                 repo=repo,
                 pr_number=number,
                 details={
-                    "retry": timeout_retry_count,
+                    "retry": timeout_count,
                     "max_retries": conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES,
                     "backoff_sec": backoff_sec,
                 },
             )
-            if timeout_retry_count >= conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES:
+            if not merging and timeout_count >= conf.PR_EVALUATION_MAX_TIMEOUT_RETRIES:
                 log.warning(
-                    "timeout_retry_exhausted",
-                    retries=timeout_retry_count,
+                    "max_evaluation_timeouts_reached",
+                    timeouts=timeout_count,
                 )
-                await dequeue_callback()
                 return
-            await asyncio.sleep(backoff_sec)
-            await requeue_callback()
+            await requeue_callback(delay_sec=backoff_sec)
 
 
 class QueueForMergeCallback(Protocol):
@@ -352,7 +359,7 @@ class PRV2:
         repo: str,
         number: int,
         dequeue_callback: Callable[[], Awaitable[None]],
-        requeue_callback: Callable[[], Awaitable[None]],
+        requeue_callback: RequeueCallback,
         queue_for_merge_callback: QueueForMergeCallback,
         client: Optional[Type[Client]] = None,
     ):
@@ -392,6 +399,13 @@ class PRV2:
 
         await set_nolabel_cache(self.install, self.owner, self.repo, self.number)
 
+    async def check_merge_cooldown(self) -> bool:
+        from kodiak.queue import check_merge_cooldown
+
+        return await check_merge_cooldown(
+            self.install, self.owner, self.repo, self.number
+        )
+
     async def dequeue(self) -> None:
         self.log.info("dequeue")
         await self.record_debug_event(
@@ -420,7 +434,18 @@ class PRV2:
         status check. This detail view is accessible via the "Details" link
         alongside the summary/detail content.
         """
-        if msg == self._last_status_message:
+        from redis.exceptions import RedisError
+
+        from kodiak.queue import check_status_dedup, set_status_dedup
+
+        redis_dedup = False
+        try:
+            redis_dedup = await check_status_dedup(
+                self.install, self.owner, self.repo, self.number, msg
+            )
+        except (OSError, RedisError):
+            self.log.debug("status_dedup_check_failed", exc_info=True)
+        if msg == self._last_status_message or redis_dedup:
             self.log.info("set_status_skipped_duplicate", message=msg)
             await self.record_debug_event(
                 stage="status",
@@ -452,6 +477,12 @@ class PRV2:
                 )
             else:
                 self._last_status_message = msg
+                try:
+                    await set_status_dedup(
+                        self.install, self.owner, self.repo, self.number, msg
+                    )
+                except (OSError, RedisError):
+                    self.log.debug("status_dedup_set_failed", exc_info=True)
                 await self.record_debug_event(
                     stage="status",
                     event_type="status_set",
@@ -642,13 +673,25 @@ class PRV2:
                 res.raise_for_status()
             except HTTPError as e:
                 if e.response is not None and e.response.status_code == 405:
-                    self.log.info(
-                        "branch is not mergeable. PR likely already merged.", res=res
-                    )
-                else:
                     self.log.warning(
-                        "failed to merge pull request", res=res, exc_info=True
+                        "merge_rejected_405",
+                        res=res,
                     )
+                    await self.record_debug_event(
+                        stage="github_action",
+                        event_type="merge_rejected_405",
+                        message="GitHub rejected merge (405). PR may have been merged externally or is not in a mergeable state.",
+                        details={
+                            "merge_method": merge_method,
+                            "status_code": 405,
+                        },
+                    )
+                    await self.set_status(
+                        "⚠️ GitHub rejected the merge (405). The PR may have been merged externally or is not in a mergeable state."
+                    )
+                    await self.dequeue()
+                    return
+                self.log.warning("failed to merge pull request", res=res, exc_info=True)
                 await self.record_debug_event(
                     stage="github_action",
                     event_type="merge_failed",

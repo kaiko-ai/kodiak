@@ -72,7 +72,7 @@ REDIS_SOCKET_CONNECT_TIMEOUT_SEC = config(
 # Each consumer pops events from the same Redis sorted set (BZPOPMIN is atomic),
 # so increasing this allows parallel PR evaluations within one installation.
 WEBHOOK_CONSUMER_CONCURRENCY = config(
-    "WEBHOOK_CONSUMER_CONCURRENCY", cast=int, default=3
+    "WEBHOOK_CONSUMER_CONCURRENCY", cast=int, default=8
 )
 
 SUBSCRIPTIONS_ENABLED = config("SUBSCRIPTIONS_ENABLED", cast=bool, default=False)

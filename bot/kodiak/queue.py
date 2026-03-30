@@ -44,8 +44,17 @@ MERGE_QUEUE_BY_INSTALL_PREFIX = "merge_queue_by_install:"
 WEBHOOK_QUEUE_NAMES = "kodiak_webhook_queue_names"
 QUEUE_PUBSUB_INGEST = "kodiak:pubsub:ingest"
 WEBHOOK_LATEST_HEAD_SHA_PREFIX = "kodiak:webhook_latest_head_sha:"
+MERGE_COOLDOWN_PREFIX = "kodiak:merge_cooldown:"
+MERGE_COOLDOWN_TTL = 300  # 5-minute cooldown after merge queue poll timeout
+
+STATUS_DEDUP_PREFIX = "kodiak:last_status:"
+STATUS_DEDUP_TTL = 300  # Only re-post identical status after 5 minutes
+
 NOLABEL_CACHE_PREFIX = "kodiak:nolabel:"
-NOLABEL_CACHE_TTL = int(timedelta(days=1).total_seconds())
+NOLABEL_CACHE_TTL = int(timedelta(hours=1).total_seconds())
+# Short-lived sentinel value written by clear_nolabel_cache to prevent
+# concurrent stale evaluations from re-poisoning the cache.
+NOLABEL_CLEARED_TTL = 120
 
 
 def get_ingest_queue(installation_id: int) -> str:
@@ -57,23 +66,81 @@ def _nolabel_cache_key(install: str, owner: str, repo: str, number: int) -> str:
 
 
 async def set_nolabel_cache(install: str, owner: str, repo: str, number: int) -> None:
-    """Cache that a PR was skipped because it lacks the automerge label."""
-    await redis_bot.set(
-        _nolabel_cache_key(install, owner, repo, number),
-        b"1",
-        ex=NOLABEL_CACHE_TTL,
-    )
+    """Cache that a PR was skipped because it lacks the automerge label.
+
+    Skips the write if a "cleared" sentinel is present — this means a
+    label-change webhook was recently processed and a concurrent stale
+    evaluation should not re-poison the cache.
+    """
+    key = _nolabel_cache_key(install, owner, repo, number)
+    current = await redis_bot.get(key)
+    if current == b"cleared":
+        return
+    await redis_bot.set(key, b"1", ex=NOLABEL_CACHE_TTL)
 
 
 async def check_nolabel_cache(install: str, owner: str, repo: str, number: int) -> bool:
     """Return True if we've cached that this PR lacks the automerge label."""
     result = await redis_bot.get(_nolabel_cache_key(install, owner, repo, number))
-    return result is not None
+    return result == b"1"
 
 
 async def clear_nolabel_cache(install: str, owner: str, repo: str, number: int) -> None:
-    """Invalidate the no-automerge-label cache for a PR."""
-    await redis_bot.delete(_nolabel_cache_key(install, owner, repo, number))
+    """Invalidate the no-automerge-label cache for a PR.
+
+    Sets a short-lived "cleared" sentinel instead of deleting the key.
+    This prevents concurrent stale evaluations (which started before the
+    label change) from re-setting the cache after we clear it.
+    """
+    await redis_bot.set(
+        _nolabel_cache_key(install, owner, repo, number),
+        b"cleared",
+        ex=NOLABEL_CLEARED_TTL,
+    )
+
+
+def _merge_cooldown_key(install: str, owner: str, repo: str, number: int) -> str:
+    return f"{MERGE_COOLDOWN_PREFIX}{install}:{owner}/{repo}#{number}"
+
+
+async def set_merge_cooldown(install: str, owner: str, repo: str, number: int) -> None:
+    """Prevent a PR from immediately re-entering the merge queue after a timeout."""
+    await redis_bot.set(
+        _merge_cooldown_key(install, owner, repo, number), b"1", ex=MERGE_COOLDOWN_TTL
+    )
+
+
+async def check_merge_cooldown(
+    install: str, owner: str, repo: str, number: int
+) -> bool:
+    """Return True if this PR was recently ejected from the merge queue."""
+    return (
+        await redis_bot.get(_merge_cooldown_key(install, owner, repo, number))
+        is not None
+    )
+
+
+def _status_dedup_key(install: str, owner: str, repo: str, number: int) -> str:
+    return f"{STATUS_DEDUP_PREFIX}{install}:{owner}/{repo}#{number}"
+
+
+async def check_status_dedup(
+    install: str, owner: str, repo: str, number: int, msg: str
+) -> bool:
+    """Return True if this exact status was already posted recently."""
+    cached = await redis_bot.get(_status_dedup_key(install, owner, repo, number))
+    return cached == msg.encode()
+
+
+async def set_status_dedup(
+    install: str, owner: str, repo: str, number: int, msg: str
+) -> None:
+    """Record that this status was posted for dedup purposes."""
+    await redis_bot.set(
+        _status_dedup_key(install, owner, repo, number),
+        msg.encode(),
+        ex=STATUS_DEDUP_TTL,
+    )
 
 
 RETRY_RATE_SECONDS = 2
@@ -151,19 +218,26 @@ async def pr_event(pr: PullRequestEvent) -> list[WebhookEvent]:
             repo=pr.repository.name,
             number=pr.number,
         )
-    return [
-        WebhookEvent(
-            repo_owner=pr.repository.owner.login,
-            repo_name=pr.repository.name,
-            pull_request_number=pr.number,
-            target_name=pr.pull_request.base.ref,
-            installation_id=str(pr.installation.id),
-            head_sha=pr.pull_request.head.sha
-            if pr.pull_request.head is not None
-            else None,
-            action=pr.action,
-        )
-    ]
+    event = WebhookEvent(
+        repo_owner=pr.repository.owner.login,
+        repo_name=pr.repository.name,
+        pull_request_number=pr.number,
+        target_name=pr.pull_request.base.ref,
+        installation_id=str(pr.installation.id),
+        head_sha=pr.pull_request.head.sha if pr.pull_request.head is not None else None,
+        action=pr.action,
+    )
+    # Proactively clean up queues when a PR is closed (merged or not).
+    # The evaluation will still run (for branch deletion, final status, etc.)
+    # but the merge queue slot is freed immediately.
+    if pr.action == "closed":
+        await redis_bot.zrem(get_merge_queue_name(event), event.merge_queue_member())
+        target_key = event.get_merge_target_queue_name()
+        current_target = await redis_bot.get(target_key)
+        if current_target == event.merge_queue_member().encode():
+            await redis_bot.delete(target_key)
+            await redis_bot.delete(target_key + ":time")
+    return [event]
 
 
 def check_run(check_run_event: CheckRunEvent) -> list[WebhookEvent]:
@@ -453,6 +527,12 @@ async def handle_webhook_event(
         event_parsed = False
 
     for event in generated_events:
+        if action in ("labeled", "unlabeled"):
+            # Remove any stale entry so the labeled/unlabeled event isn't
+            # silently dropped by the NX-dedup in enqueue's ZADD.
+            await redis_bot.zrem(
+                get_webhook_queue_name(event), event.webhook_queue_member()
+            )
         await queue.enqueue(event=event)
 
     await record_debug_event(
@@ -639,10 +719,10 @@ async def process_webhook_event(
             webhook_event.get_merge_queue_name(), webhook_event.merge_queue_member()
         )
 
-    async def requeue() -> None:
+    async def requeue(*, delay_sec: float = 0) -> None:
         await redis_bot.zadd(
             webhook_event.get_webhook_queue_name(),
-            {webhook_event.webhook_queue_member(): time.time()},
+            {webhook_event.webhook_queue_member(): time.time() + delay_sec},
             nx=True,
         )
 
@@ -782,10 +862,10 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
             webhook_event.get_merge_queue_name(), webhook_event.merge_queue_member()
         )
 
-    async def requeue() -> None:
+    async def requeue(*, delay_sec: float = 0) -> None:
         await redis_bot.zadd(
             webhook_event.get_webhook_queue_name(),
-            {webhook_event.webhook_queue_member(): time.time()},
+            {webhook_event.webhook_queue_member(): time.time() + delay_sec},
             nx=True,
         )
 
