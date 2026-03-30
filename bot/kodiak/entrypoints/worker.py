@@ -15,6 +15,7 @@ import structlog
 from kodiak import (
     app_config as conf,
     app_identity,
+    startup_reconciliation,
 )
 from kodiak.assertions import assert_never
 from kodiak.debug_history import record_debug_event, summarize_webhook_payload
@@ -166,6 +167,15 @@ async def main() -> NoReturn:
 
     ingest_queue_names = await redis_bot.smembers(INGEST_QUEUE_NAMES)
     log = logger.bind(task="main_worker")
+
+    # Fire-and-forget: scan all installations' open PRs in the background so
+    # we catch anything missed during downtime.  Webhook processing starts
+    # immediately — the scan does not block.
+    if conf.STARTUP_RECONCILIATION_ENABLED:
+        log.info("startup_reconciliation_scheduled")
+        _startup_scan = asyncio.create_task(  # noqa: RUF006
+            startup_reconciliation.run_startup_scan(queue)
+        )
 
     for queue_name_bytes in ingest_queue_names:
         queue_name = queue_name_bytes.decode()

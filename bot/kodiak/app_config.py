@@ -127,5 +127,16 @@ else:
     )
 
 
+# Startup reconciliation scan: whether to enqueue all open PRs on worker start.
+STARTUP_RECONCILIATION_ENABLED = config(
+    "STARTUP_RECONCILIATION_ENABLED", cast=bool, default=True
+)
+
+# Maximum number of installations to scan in parallel during startup reconciliation.
+STARTUP_RECONCILIATION_CONCURRENCY = config(
+    "STARTUP_RECONCILIATION_CONCURRENCY", cast=int, default=5
+)
+
+
 def v3_url(path: str) -> str:
     return GITHUB_V3_API_ROOT + path
