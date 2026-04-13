@@ -582,6 +582,21 @@ class PRV2:
             try:
                 res.raise_for_status()
             except HTTPError as e:
+                # GitHub returns 422 when the branch is already up-to-date.
+                # This is not an error from Kodiak's perspective — the branch
+                # doesn't need updating, so treat it like a success.
+                if res.status_code == 422:
+                    self.log.info(
+                        "update_branch: branch already up-to-date (422), skipping",
+                        res=res,
+                    )
+                    await self.record_debug_event(
+                        stage="github_action",
+                        event_type="update_branch_already_up_to_date",
+                        message="Branch is already up-to-date, no update needed",
+                        details={"status_code": res.status_code, "response": res.text},
+                    )
+                    return
                 self.log.warning("failed to update branch", res=res, exc_info=True)
                 await self.record_debug_event(
                     stage="github_action",

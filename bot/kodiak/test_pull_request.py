@@ -352,6 +352,27 @@ async def test_pr_v2_update_branch_service_unavailable() -> None:
     assert b"Service Unavailable" in e.value.response
 
 
+async def test_pr_v2_update_branch_already_up_to_date() -> None:
+    """
+    GitHub returns 422 when the branch is already up-to-date.  Kodiak should
+    treat this as a success — no update is needed — rather than retrying and
+    surfacing a "problem contacting GitHub API" error.
+
+    This commonly occurs when optimistic_updates=False: checks must pass
+    before update_branch() is called, and by that point GitHub may consider
+    the branch already current (stale mergeStateStatus=BEHIND from GraphQL).
+    """
+    client = create_client()
+    client.update_branch.response = create_response(
+        content=b'{"message":"The branch is already up-to-date."}', status_code=422
+    )
+    pr_v2 = create_prv2(client=client)
+    # Should return without raising — not an error from Kodiak's perspective.
+    await pr_v2.update_branch()
+    assert client.update_branch.call_count == 1
+    assert client.update_branch.calls[0]["pull_number"] == pr_v2.number
+
+
 async def test_pr_v2_add_label_ok() -> None:
     """
     We should be able to add a label.
