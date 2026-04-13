@@ -16,7 +16,7 @@ from kodiak.errors import (
     PollForever,
     RetryForSkippableChecks,
 )
-from kodiak.evaluation import mergeable
+from kodiak.evaluation import POLL_REASON_UPDATING_BRANCH, mergeable
 from kodiak.http import HTTPStatusError as HTTPError
 from kodiak.queries import Client, EventInfoResponse
 
@@ -24,7 +24,7 @@ logger = structlog.get_logger()
 
 
 RETRY_RATE_SECONDS = 2
-POLL_RATE_SECONDS = 3
+POLL_RATE_SECONDS = 10
 
 
 class RequeueCallback(Protocol):
@@ -84,6 +84,9 @@ async def evaluate_pr(
     last_poll_reason: str = ""
     cycle_count = 0
     timeout_count = 0
+    # Track the head SHA at the time we last called update_branch() so we can
+    # skip duplicate calls while GitHub is still processing the branch update.
+    pending_update_sha: str | None = None
     start_time = time.monotonic()
     log = log.bind(owner=owner, repo=repo, number=number, merging=merging)
     await record_debug_history_event(
@@ -145,6 +148,7 @@ async def evaluate_pr(
                         api_call_errors=api_call_errors,
                         api_call_retries_remaining=api_call_retries_remaining,
                         head_exists=pr.event.head_exists,
+                        pending_update_sha=pending_update_sha,
                     ),
                     timeout=conf.PR_EVALUATION_TIMEOUT_SEC,
                 )
@@ -191,6 +195,15 @@ async def evaluate_pr(
                 cycle_count += 1
                 if e.reason:
                     last_poll_reason = e.reason
+                # If we just called update_branch(), record the current head
+                # SHA so we can skip duplicate API calls on subsequent cycles
+                # while GitHub is still processing the branch update.
+                # Reset the guard once the reason changes (update propagated).
+                if e.reason and e.reason.startswith(POLL_REASON_UPDATING_BRANCH):
+                    if pr is not None:
+                        pending_update_sha = pr.event.pull_request.latest_sha
+                else:
+                    pending_update_sha = None
                 if poll_start_time is None:
                     poll_start_time = time.monotonic()
                 elapsed_ms = int((time.monotonic() - poll_start_time) * 1000)

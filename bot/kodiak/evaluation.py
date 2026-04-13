@@ -75,6 +75,16 @@ REQUEUE_BACKOFF_SECONDS = 5
 # before giving up and waiting for a natural webhook event.
 MAX_REQUEUE_ATTEMPTS = 5
 
+# PollForever reason prefix used when update_branch() has been called and we
+# are waiting for GitHub to process it. pull_request.py uses this to track
+# whether a branch update is in-flight.
+POLL_REASON_UPDATING_BRANCH = "updating branch"
+
+# PollForever reason used when we skip the duplicate update_branch() call
+# because GitHub hasn't finished creating the merge commit yet.  Starts with
+# POLL_REASON_UPDATING_BRANCH so pull_request.py keeps pending_update_sha set.
+POLL_REASON_WAITING_FOR_BRANCH_UPDATE = f"{POLL_REASON_UPDATING_BRANCH} (propagating)"
+
 
 def get_body_content(  # noqa: RET503
     *,
@@ -654,6 +664,7 @@ async def mergeable(
     subscription: Optional[Subscription],
     app_id: Optional[str] = None,
     head_exists: bool = True,
+    pending_update_sha: Optional[str] = None,
 ) -> None:
     # TODO(chdsbd): Use structlog bind_contextvars to automatically set useful context (install id, repo, pr number).
     log = logger.bind(number=pull_request.number, url=pull_request.url)
@@ -1333,22 +1344,41 @@ async def mergeable(
         )
 
         if config.merge.update_branch_immediately and need_branch_update:
+            if (
+                pending_update_sha is not None
+                and pending_update_sha == pull_request.latest_sha
+            ):
+                # update_branch() was already called this cycle; GitHub hasn't
+                # finished creating the merge commit yet — skip the duplicate call.
+                if merging:
+                    raise PollForever(POLL_REASON_WAITING_FOR_BRANCH_UPDATE)
+                return
             await set_status(
                 "🔄 updating branch",
                 markdown_content="branch updated because `merge.update_branch_immediately = true` is configured.",
             )
             await api.update_branch()
             if merging:
-                raise PollForever("updating branch (update_branch_immediately)")
+                raise PollForever(
+                    f"{POLL_REASON_UPDATING_BRANCH} (update_branch_immediately)"
+                )
             return
 
         if merging:
             # prioritize branch updates over waiting for status checks to complete
             if config.merge.optimistic_updates:
                 if need_branch_update:
+                    if (
+                        pending_update_sha is not None
+                        and pending_update_sha == pull_request.latest_sha
+                    ):
+                        # update_branch() was already called this cycle; GitHub
+                        # hasn't finished creating the merge commit yet — skip
+                        # the duplicate call to avoid multiple merge commits.
+                        raise PollForever(POLL_REASON_WAITING_FOR_BRANCH_UPDATE)
                     await set_status("⛴ merging PR (updating branch)")
                     await api.update_branch()
-                    raise PollForever("updating branch")
+                    raise PollForever(POLL_REASON_UPDATING_BRANCH)
                 if wait_for_checks:
                     await set_status(
                         f"⛴ merging PR (waiting for status checks: {missing_required_status_checks!r})"
@@ -1367,9 +1397,17 @@ async def mergeable(
                         f"waiting for status checks: {missing_required_status_checks!r}"
                     )
                 if need_branch_update:
+                    if (
+                        pending_update_sha is not None
+                        and pending_update_sha == pull_request.latest_sha
+                    ):
+                        # update_branch() was already called this cycle; GitHub
+                        # hasn't finished creating the merge commit yet — skip
+                        # the duplicate call to avoid multiple merge commits.
+                        raise PollForever(POLL_REASON_WAITING_FOR_BRANCH_UPDATE)
                     await set_status("⛴ merging PR (updating branch)")
                     await api.update_branch()
-                    raise PollForever("updating branch")
+                    raise PollForever(POLL_REASON_UPDATING_BRANCH)
 
         # if we reach this point and we don't need to wait for checks or update a branch
         # we've failed to calculate why the PR is blocked. This should _not_ happen

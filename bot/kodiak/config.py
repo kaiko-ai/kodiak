@@ -92,8 +92,16 @@ class Merge(BaseModel):
     block_on_neutral_required_check_runs: bool = False
     # comment on merge conflict and remove automerge label
     notify_on_conflict: bool = True
-    # don't wait for status checks to run before updating branch
-    optimistic_updates: bool = True
+    # When True, update the branch before waiting for status checks during an
+    # active merge. This means CI runs on the freshly-merged base, but if main
+    # receives another commit while CI is running, the PR becomes BEHIND again
+    # and must be updated a second time (restarting CI).
+    #
+    # When False (default), wait for all required status checks to pass first,
+    # then update the branch once immediately before merging. CI re-runs on the
+    # updated head, but the update window is as short as possible — minimising
+    # the chance that main moves again and forces another CI cycle.
+    optimistic_updates: bool = False
     # configuration for commit message of merge
     message: MergeMessage = MergeMessage()
     # status checks that we don't want to wait to complete when they are in a
