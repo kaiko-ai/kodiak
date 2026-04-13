@@ -11,6 +11,8 @@ from kodiak.config import V1, MergeMethod
 from kodiak.errors import GitHubApiInternalServerError, PollForever
 from kodiak.evaluation import (
     MAX_REQUEUE_ATTEMPTS,
+    POLL_REASON_UPDATING_BRANCH,
+    POLL_REASON_WAITING_FOR_BRANCH_UPDATE,
     PRAPI,
     mergeable as mergeable_func,
 )
@@ -393,6 +395,7 @@ class MergeableType(Protocol):
         repository: RepoInfo = ...,
         subscription: Optional[Subscription] = ...,
         app_id: Optional[str] = ...,
+        pending_update_sha: Optional[str] = ...,
     ) -> None: ...
 
 
@@ -424,6 +427,7 @@ def create_mergeable() -> MergeableType:
         repository: RepoInfo = create_repo_info(),
         subscription: Optional[Subscription] = None,
         app_id: Optional[str] = None,
+        pending_update_sha: Optional[str] = None,
     ) -> None:
         """
         wrapper around evaluation.mergeable that simplifies tests by providing
@@ -451,6 +455,7 @@ def create_mergeable() -> MergeableType:
             api_call_errors=api_call_errors,
             subscription=subscription,
             app_id=app_id,
+            pending_update_sha=pending_update_sha,
         )
 
     return mergeable
@@ -2634,6 +2639,80 @@ async def test_blocked_unknown_retry_limit_exceeded() -> None:
     assert "GitHub issue" in api.set_status.calls[0]["msg"]
     assert api.merge.called is False
     assert api.queue_for_merge.called is False
+
+
+async def test_pending_update_sha_guard_skips_duplicate_update_branch() -> None:
+    """
+    When update_branch() was already called in a previous PollForever cycle and
+    GitHub hasn't finished creating the merge commit yet (latest_sha hasn't
+    changed), we must NOT call update_branch() again.  The guard fires when
+    pending_update_sha == pull_request.latest_sha.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    pull_request = create_pull_request()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+
+    with pytest.raises(PollForever) as exc_info:
+        await mergeable(
+            api=api,
+            pull_request=pull_request,
+            merging=True,
+            # Pass the same SHA as the PR's current head — update not processed yet.
+            pending_update_sha=pull_request.latest_sha,
+        )
+
+    assert api.update_branch.call_count == 0, (
+        "must not call update_branch() again while GitHub is still processing the previous one"
+    )
+    assert exc_info.value.reason == POLL_REASON_WAITING_FOR_BRANCH_UPDATE
+
+
+async def test_pending_update_sha_guard_allows_update_after_sha_changes() -> None:
+    """
+    Once GitHub creates the merge commit, latest_sha changes.  The guard must
+    NOT fire in that case — update_branch() should be called normally.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    pull_request = create_pull_request()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+
+    with pytest.raises(PollForever) as exc_info:
+        await mergeable(
+            api=api,
+            pull_request=pull_request,
+            merging=True,
+            # A *different* SHA — means the previous update was processed.
+            pending_update_sha="old-sha-before-update",
+        )
+
+    assert api.update_branch.call_count == 1, (
+        "must call update_branch() once when the SHA has changed"
+    )
+    assert exc_info.value.reason == POLL_REASON_UPDATING_BRANCH
+
+
+async def test_pending_update_sha_guard_none_allows_update() -> None:
+    """
+    When pending_update_sha is None (no in-flight update), update_branch() must
+    be called unconditionally on the first cycle.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    pull_request = create_pull_request()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+
+    with pytest.raises(PollForever) as exc_info:
+        await mergeable(
+            api=api,
+            pull_request=pull_request,
+            merging=True,
+            pending_update_sha=None,
+        )
+
+    assert api.update_branch.call_count == 1
+    assert exc_info.value.reason == POLL_REASON_UPDATING_BRANCH
 
 
 async def test_blocked_unknown_within_retry_limit() -> None:
