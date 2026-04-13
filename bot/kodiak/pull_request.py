@@ -582,6 +582,41 @@ class PRV2:
             try:
                 res.raise_for_status()
             except HTTPError as e:
+                # GitHub returns 422 for several reasons; inspect the message
+                # before deciding how to handle it.
+                if res.status_code == 422:
+                    try:
+                        body = res.json()
+                        gh_message = (
+                            body.get("message", "") if isinstance(body, dict) else ""
+                        )
+                    except ValueError:
+                        gh_message = ""
+                    # Always log the full 422 body so we can confirm the exact
+                    # message GitHub sends (the string we match below is an
+                    # educated guess — real data will let us verify or correct it).
+                    self.log.warning(
+                        "update_branch: GitHub returned 422",
+                        gh_message=gh_message,
+                        response_body=res.text,
+                    )
+                    # "already up-to-date" means the branch doesn't need
+                    # updating — stale mergeStateStatus=BEHIND from GraphQL.
+                    # Treat as success so we don't exhaust retries pointlessly.
+                    if (
+                        "up-to-date" in gh_message.lower()
+                        or "already up to date" in gh_message.lower()
+                    ):
+                        await self.record_debug_event(
+                            stage="github_action",
+                            event_type="update_branch_already_up_to_date",
+                            message="Branch is already up-to-date, no update needed",
+                            details={
+                                "status_code": res.status_code,
+                                "gh_message": gh_message,
+                            },
+                        )
+                        return
                 self.log.warning("failed to update branch", res=res, exc_info=True)
                 await self.record_debug_event(
                     stage="github_action",
