@@ -592,6 +592,14 @@ class PRV2:
                         )
                     except ValueError:
                         gh_message = ""
+                    # Always log the full 422 body so we can confirm the exact
+                    # message GitHub sends (the string we match below is an
+                    # educated guess — real data will let us verify or correct it).
+                    self.log.warning(
+                        "update_branch: GitHub returned 422",
+                        gh_message=gh_message,
+                        response_body=res.text,
+                    )
                     # "already up-to-date" means the branch doesn't need
                     # updating — stale mergeStateStatus=BEHIND from GraphQL.
                     # Treat as success so we don't exhaust retries pointlessly.
@@ -599,10 +607,6 @@ class PRV2:
                         "up-to-date" in gh_message.lower()
                         or "already up to date" in gh_message.lower()
                     ):
-                        self.log.info(
-                            "update_branch: branch already up-to-date (422), skipping",
-                            gh_message=gh_message,
-                        )
                         await self.record_debug_event(
                             stage="github_action",
                             event_type="update_branch_already_up_to_date",
