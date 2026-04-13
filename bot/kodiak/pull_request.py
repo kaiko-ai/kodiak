@@ -582,21 +582,37 @@ class PRV2:
             try:
                 res.raise_for_status()
             except HTTPError as e:
-                # GitHub returns 422 when the branch is already up-to-date.
-                # This is not an error from Kodiak's perspective — the branch
-                # doesn't need updating, so treat it like a success.
+                # GitHub returns 422 for several reasons; inspect the message
+                # before deciding how to handle it.
                 if res.status_code == 422:
-                    self.log.info(
-                        "update_branch: branch already up-to-date (422), skipping",
-                        res=res,
-                    )
-                    await self.record_debug_event(
-                        stage="github_action",
-                        event_type="update_branch_already_up_to_date",
-                        message="Branch is already up-to-date, no update needed",
-                        details={"status_code": res.status_code, "response": res.text},
-                    )
-                    return
+                    try:
+                        body = res.json()
+                        gh_message = (
+                            body.get("message", "") if isinstance(body, dict) else ""
+                        )
+                    except ValueError:
+                        gh_message = ""
+                    # "already up-to-date" means the branch doesn't need
+                    # updating — stale mergeStateStatus=BEHIND from GraphQL.
+                    # Treat as success so we don't exhaust retries pointlessly.
+                    if (
+                        "up-to-date" in gh_message.lower()
+                        or "already up to date" in gh_message.lower()
+                    ):
+                        self.log.info(
+                            "update_branch: branch already up-to-date (422), skipping",
+                            gh_message=gh_message,
+                        )
+                        await self.record_debug_event(
+                            stage="github_action",
+                            event_type="update_branch_already_up_to_date",
+                            message="Branch is already up-to-date, no update needed",
+                            details={
+                                "status_code": res.status_code,
+                                "gh_message": gh_message,
+                            },
+                        )
+                        return
                 self.log.warning("failed to update branch", res=res, exc_info=True)
                 await self.record_debug_event(
                     stage="github_action",

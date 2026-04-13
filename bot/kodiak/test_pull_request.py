@@ -373,6 +373,22 @@ async def test_pr_v2_update_branch_already_up_to_date() -> None:
     assert client.update_branch.calls[0]["pull_number"] == pr_v2.number
 
 
+async def test_pr_v2_update_branch_422_other_reason() -> None:
+    """
+    A 422 that is NOT "already up-to-date" (e.g. a merge conflict) should
+    still raise ApiCallException so the retry/error path is triggered.
+    """
+    client = create_client()
+    client.update_branch.response = create_response(
+        content=b'{"message":"merge conflict"}', status_code=422
+    )
+    pr_v2 = create_prv2(client=client)
+    with pytest.raises(ApiCallException) as e:
+        await pr_v2.update_branch()
+    assert e.value.status_code == 422
+    assert e.value.method == "pull_request/update_branch"
+
+
 async def test_pr_v2_add_label_ok() -> None:
     """
     We should be able to add a label.
