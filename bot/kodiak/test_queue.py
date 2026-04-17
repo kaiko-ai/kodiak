@@ -1,5 +1,5 @@
-from typing import Optional
-from unittest.mock import patch
+from typing import Any, Dict, List, Optional, Tuple
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import structlog
@@ -168,6 +168,141 @@ async def test_process_webhook_event_skips_stale_head_sha(mocker) -> None:  # ty
 
     mock_evaluate_pr.assert_not_called()
     redis_mock.zscore.assert_not_called()
+
+
+class _EvalLockRedisMock:
+    """Minimal async stand-in for redis_bot covering lock + queue APIs."""
+
+    def __init__(self, *, acquire_lock: bool) -> None:
+        self.acquire_lock = acquire_lock
+        self.zadd_calls: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+        self.eval_calls: List[Tuple[Any, ...]] = []
+        self.set_calls: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+
+    async def get(self, key: str) -> Optional[bytes]:
+        # Used for merge-target key and latest-head-sha key checks earlier
+        # in process_webhook_event.  Return None so those paths pass.
+        return None
+
+    async def zscore(self, *args: Any, **kwargs: Any) -> Optional[float]:
+        return None
+
+    async def set(self, *args: Any, **kwargs: Any) -> bool:
+        self.set_calls.append((args, kwargs))
+        # Only NX=True calls are lock acquisitions; others (if any) succeed.
+        if kwargs.get("nx"):
+            return bool(self.acquire_lock)
+        return True
+
+    async def zadd(self, *args: Any, **kwargs: Any) -> int:
+        self.zadd_calls.append((args, kwargs))
+        return 1
+
+    async def eval(self, *args: Any, **kwargs: Any) -> int:
+        self.eval_calls.append(args)
+        return 1
+
+
+async def _run_process_webhook_event_with_lock(
+    mocker: Any,
+    *,
+    acquire_lock: bool,
+    evaluate_raises: Optional[BaseException] = None,
+) -> Tuple[_EvalLockRedisMock, AsyncMock]:
+    event = WebhookEvent(
+        repo_owner="acme",
+        repo_name="widgets",
+        pull_request_number=42,
+        installation_id="117046149",
+        target_name="main",
+        head_sha=None,
+    )
+    queue_name = event.get_webhook_queue_name()
+
+    redis_mock = _EvalLockRedisMock(acquire_lock=acquire_lock)
+    mocker.patch("kodiak.queue.redis_bot", redis_mock)
+    mocker.patch(
+        "kodiak.queue.bzpopmin_with_timeout",
+        mocker.AsyncMock(
+            return_value=(
+                queue_name.encode(),
+                event.webhook_queue_member().encode(),
+                123.0,
+            )
+        ),
+    )
+    mocker.patch(
+        "kodiak.queue.check_nolabel_cache", mocker.AsyncMock(return_value=False)
+    )
+    mocker.patch("kodiak.queue.record_debug_event", mocker.AsyncMock())
+    if evaluate_raises is not None:
+        mock_evaluate_pr = mocker.patch(
+            "kodiak.queue.evaluate_pr",
+            mocker.AsyncMock(side_effect=evaluate_raises),
+        )
+    else:
+        mock_evaluate_pr = mocker.patch("kodiak.queue.evaluate_pr", mocker.AsyncMock())
+
+    if evaluate_raises is not None:
+        with pytest.raises(type(evaluate_raises)):
+            await process_webhook_event(
+                RedisWebhookQueue(), queue_name, structlog.get_logger()
+            )
+    else:
+        await process_webhook_event(
+            RedisWebhookQueue(), queue_name, structlog.get_logger()
+        )
+    return redis_mock, mock_evaluate_pr
+
+
+@pytest.mark.asyncio
+async def test_process_webhook_event_acquires_and_releases_pr_eval_lock(
+    mocker: Any,
+) -> None:
+    """On the happy path we acquire the lock, run evaluate_pr, then release."""
+    redis_mock, mock_evaluate_pr = await _run_process_webhook_event_with_lock(
+        mocker, acquire_lock=True
+    )
+
+    mock_evaluate_pr.assert_awaited_once()
+    # One SET call for the lock (nx=True, ex=TTL)
+    lock_sets = [c for c in redis_mock.set_calls if c[1].get("nx")]
+    assert len(lock_sets) == 1
+    # Lock released via Lua eval (compare-and-delete)
+    assert len(redis_mock.eval_calls) == 1
+    # No contention requeue
+    assert redis_mock.zadd_calls == []
+
+
+@pytest.mark.asyncio
+async def test_process_webhook_event_skips_and_requeues_when_locked(
+    mocker: Any,
+) -> None:
+    """When another worker holds the lock, we skip evaluate_pr and requeue."""
+    redis_mock, mock_evaluate_pr = await _run_process_webhook_event_with_lock(
+        mocker, acquire_lock=False
+    )
+
+    mock_evaluate_pr.assert_not_called()
+    # Exactly one requeue via zadd with nx=True
+    assert len(redis_mock.zadd_calls) == 1
+    _args, kwargs = redis_mock.zadd_calls[0]
+    assert kwargs.get("nx") is True
+    # Nothing to release since we never acquired
+    assert redis_mock.eval_calls == []
+
+
+@pytest.mark.asyncio
+async def test_process_webhook_event_releases_lock_on_evaluate_pr_error(
+    mocker: Any,
+) -> None:
+    """If evaluate_pr raises, the lock must still be released."""
+    redis_mock, _mock_evaluate_pr = await _run_process_webhook_event_with_lock(
+        mocker, acquire_lock=True, evaluate_raises=RuntimeError("boom")
+    )
+
+    # Lock was released despite the exception
+    assert len(redis_mock.eval_calls) == 1
 
 
 def test_webhook_event_queue_serialization_is_sha_aware() -> None:
