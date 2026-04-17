@@ -271,10 +271,19 @@ async def evaluate_pr(
                     # push, review, label change, etc.).
                     await dequeue_callback()
                     # Set a cooldown so the PR doesn't immediately re-enter
-                    # the merge queue on the next webhook event.
+                    # the merge queue on the next webhook event.  Scope the
+                    # cooldown to the current head SHA so a new push from
+                    # the user clears it naturally.
                     from kodiak.queue import set_merge_cooldown
 
-                    await set_merge_cooldown(install, owner, repo, number)
+                    assert pr is not None
+                    await set_merge_cooldown(
+                        install,
+                        owner,
+                        repo,
+                        number,
+                        pr.event.pull_request.latest_sha,
+                    )
                     return
                 await asyncio.sleep(POLL_RATE_SECONDS)
                 continue
@@ -412,12 +421,17 @@ class PRV2:
 
         await set_nolabel_cache(self.install, self.owner, self.repo, self.number)
 
-    async def check_merge_cooldown(self) -> bool:
+    async def check_merge_cooldown(self, head_sha: str) -> bool:
         from kodiak.queue import check_merge_cooldown
 
         return await check_merge_cooldown(
-            self.install, self.owner, self.repo, self.number
+            self.install, self.owner, self.repo, self.number, head_sha
         )
+
+    async def clear_merge_cooldown(self) -> None:
+        from kodiak.queue import clear_merge_cooldown
+
+        await clear_merge_cooldown(self.install, self.owner, self.repo, self.number)
 
     async def increment_requeue_attempts(self, reason: str) -> int:
         from kodiak.queue import increment_requeue_attempts

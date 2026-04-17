@@ -166,21 +166,37 @@ def _merge_cooldown_key(install: str, owner: str, repo: str, number: int) -> str
     return f"{MERGE_COOLDOWN_PREFIX}{install}:{owner}/{repo}#{number}"
 
 
-async def set_merge_cooldown(install: str, owner: str, repo: str, number: int) -> None:
-    """Prevent a PR from immediately re-entering the merge queue after a timeout."""
+async def set_merge_cooldown(
+    install: str, owner: str, repo: str, number: int, head_sha: str
+) -> None:
+    """Prevent a PR from immediately re-entering the merge queue after a timeout.
+
+    The cooldown is scoped to ``head_sha``: a new push invalidates it so the
+    user can always force a retry by pushing a fix.
+    """
     await redis_bot.set(
-        _merge_cooldown_key(install, owner, repo, number), b"1", ex=MERGE_COOLDOWN_TTL
+        _merge_cooldown_key(install, owner, repo, number),
+        head_sha.encode(),
+        ex=MERGE_COOLDOWN_TTL,
     )
 
 
 async def check_merge_cooldown(
-    install: str, owner: str, repo: str, number: int
+    install: str, owner: str, repo: str, number: int, head_sha: str
 ) -> bool:
-    """Return True if this PR was recently ejected from the merge queue."""
-    return (
-        await redis_bot.get(_merge_cooldown_key(install, owner, repo, number))
-        is not None
-    )
+    """Return True if this PR was recently ejected from the merge queue on ``head_sha``.
+
+    A cooldown set on a different SHA is considered stale and ignored.
+    """
+    stored = await redis_bot.get(_merge_cooldown_key(install, owner, repo, number))
+    return stored is not None and stored == head_sha.encode()
+
+
+async def clear_merge_cooldown(
+    install: str, owner: str, repo: str, number: int
+) -> None:
+    """Remove any active merge cooldown for this PR."""
+    await redis_bot.delete(_merge_cooldown_key(install, owner, repo, number))
 
 
 def _requeue_attempts_key(
