@@ -344,7 +344,9 @@ class PRAPI(Protocol):
 
     async def cache_no_automerge_label(self) -> None: ...
 
-    async def check_merge_cooldown(self) -> bool: ...
+    async def check_merge_cooldown(self, head_sha: str) -> bool: ...
+
+    async def clear_merge_cooldown(self) -> None: ...
 
     async def increment_requeue_attempts(self, reason: str) -> int: ...
 
@@ -1587,7 +1589,14 @@ branch protection requirements.
                 "skip queue_for_merge: PR is already the active merge target",
             )
             return
-        if await api.check_merge_cooldown():
+        priority_merge = config.merge.priority_merge_label in pull_request.labels
+        # A priority-merge label is the user's explicit "merge ASAP" signal,
+        # so it bypasses the post-timeout cooldown.  Clear any lingering
+        # cooldown key so a subsequent non-priority re-evaluation (e.g. if
+        # the label is removed) isn't gated by a stale cooldown.
+        if priority_merge:
+            await api.clear_merge_cooldown()
+        elif await api.check_merge_cooldown(pull_request.latest_sha):
             log.info("merge_decision", reason="merge_cooldown_active")
             await record_decision(
                 "merge_cooldown_active",
@@ -1601,12 +1610,8 @@ branch protection requirements.
         await record_decision(
             "queued_for_merge",
             "Queued the PR for merge",
-            details={
-                "priority_merge": config.merge.priority_merge_label
-                in pull_request.labels,
-            },
+            details={"priority_merge": priority_merge},
         )
-        priority_merge = config.merge.priority_merge_label in pull_request.labels
         position_in_queue = await api.queue_for_merge(first=priority_merge)
         if position_in_queue is None:
             # this case should be rare/impossible.

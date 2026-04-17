@@ -175,9 +175,14 @@ class MockCacheNoAutomergeLabel(BaseMockFunc):
 class MockCheckMergeCooldown(BaseMockFunc):
     response: bool = False
 
-    async def __call__(self) -> bool:
-        self.log_call(dict())
+    async def __call__(self, head_sha: str) -> bool:
+        self.log_call(dict(head_sha=head_sha))
         return self.response
+
+
+class MockClearMergeCooldown(BaseMockFunc):
+    async def __call__(self) -> None:
+        self.log_call(dict())
 
 
 class MockIncrementRequeueAttempts(BaseMockFunc):
@@ -231,6 +236,7 @@ class MockPrApi:
         self.update_branch = MockUpdateBranch()
         self.approve_pull_request = MockApprovePullRequest()
         self.check_merge_cooldown = MockCheckMergeCooldown()
+        self.clear_merge_cooldown = MockClearMergeCooldown()
         self.increment_requeue_attempts = MockIncrementRequeueAttempts()
 
     def get_api_methods(self) -> List[Tuple[str, BaseMockFunc]]:
@@ -2495,6 +2501,61 @@ async def test_mergeable_priority_merge_label() -> None:
     assert api.dequeue.call_count == 0
     assert api.update_branch.call_count == 0
     assert api.merge.call_count == 0
+
+
+async def test_merge_cooldown_blocks_non_priority_pr() -> None:
+    """When cooldown is active for the current SHA, a non-priority PR is skipped."""
+    api = create_api()
+    api.check_merge_cooldown.response = True
+    mergeable = create_mergeable()
+
+    await mergeable(api=api)
+
+    assert api.queue_for_merge.call_count == 0
+    assert api.clear_merge_cooldown.call_count == 0
+    assert api.set_status.call_count == 1
+    assert "Waiting after merge queue timeout" in api.set_status.calls[0]["msg"]
+
+
+async def test_merge_cooldown_checked_with_current_sha() -> None:
+    """check_merge_cooldown must be called with the pull request's latest SHA."""
+    api = create_api()
+    mergeable = create_mergeable()
+    pull_request = create_pull_request()
+    pull_request.latest_sha = "abc1234sha"
+
+    await mergeable(api=api, pull_request=pull_request)
+
+    assert api.check_merge_cooldown.call_count == 1
+    assert api.check_merge_cooldown.calls[0]["head_sha"] == "abc1234sha"
+
+
+async def test_priority_merge_label_bypasses_cooldown() -> None:
+    """
+    Regression: priority_merge_label should bypass merge_cooldown_active so a
+    priority PR is not overtaken by unrelated PRs while sitting in cooldown.
+    """
+    api = create_api()
+    api.check_merge_cooldown.response = True
+    mergeable = create_mergeable()
+    config = create_config()
+    config.merge.priority_merge_label = "merge this PR stat!"
+
+    pull_request = create_pull_request()
+    pull_request.labels.append(config.merge.priority_merge_label)
+
+    await mergeable(api=api, config=config, pull_request=pull_request)
+
+    assert api.clear_merge_cooldown.call_count == 1, (
+        "priority_merge should clear any lingering cooldown on its way to the queue"
+    )
+    assert api.check_merge_cooldown.call_count == 0, (
+        "priority_merge must not be gated by the cooldown check"
+    )
+    assert api.queue_for_merge.call_count == 1
+    assert api.queue_for_merge.calls[0]["first"] is True
+    assert api.set_status.call_count == 1
+    assert "enqueued" in api.set_status.calls[0]["msg"]
 
 
 async def test_unknown_mergeability_no_automerge_label_skips_trigger() -> None:
