@@ -5,6 +5,7 @@ import json
 import time
 import typing
 import urllib
+import uuid
 from asyncio.tasks import Task
 from dataclasses import dataclass
 from datetime import timedelta
@@ -59,6 +60,31 @@ NOLABEL_CACHE_TTL = int(timedelta(hours=1).total_seconds())
 # concurrent stale evaluations from re-poisoning the cache.
 NOLABEL_CLEARED_TTL = 120
 
+# Per-PR evaluation lock.  Webhook consumers run with
+# WEBHOOK_CONSUMER_CONCURRENCY > 1 and a burst of events for the same PR
+# (opened + labeled + synchronize + check_run, etc.) can otherwise produce
+# parallel evaluations that each read stale state and each post a duplicate
+# approval / update_branch / comment.  The lock serialises evaluations for
+# one PR while leaving different PRs free to run in parallel.
+PR_EVAL_LOCK_PREFIX = "kodiak:pr_eval_lock:"
+# Safe upper bound: covers a normal evaluation plus a few PollForever
+# cycles.  If the holder crashes, the key expires and another worker can
+# proceed.
+PR_EVAL_LOCK_TTL_SEC = 180
+# Delay before a contention-skipped event is retried, so the lock holder
+# has a chance to finish first.
+PR_EVAL_LOCK_CONTENTION_REQUEUE_DELAY_SEC = 2
+
+# Compare-and-delete so a worker never releases a lock it no longer owns
+# (e.g. its TTL expired and another worker re-acquired it).
+_RELEASE_PR_EVAL_LOCK_LUA = """
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+else
+    return 0
+end
+"""
+
 
 def get_ingest_queue(installation_id: int) -> str:
     return f"kodiak:ingest:{installation_id}"
@@ -99,6 +125,40 @@ async def clear_nolabel_cache(install: str, owner: str, repo: str, number: int) 
         _nolabel_cache_key(install, owner, repo, number),
         b"cleared",
         ex=NOLABEL_CLEARED_TTL,
+    )
+
+
+def _pr_eval_lock_key(install: str, owner: str, repo: str, number: int) -> str:
+    return f"{PR_EVAL_LOCK_PREFIX}{install}:{owner}/{repo}#{number}"
+
+
+async def acquire_pr_eval_lock(
+    install: str, owner: str, repo: str, number: int
+) -> Optional[str]:
+    """Try to acquire the per-PR evaluation lock.
+
+    Returns a token on success, or None if another worker holds it.
+    The token must be passed to release_pr_eval_lock to release the lock.
+    """
+    token = uuid.uuid4().hex
+    acquired = await redis_bot.set(
+        _pr_eval_lock_key(install, owner, repo, number),
+        token,
+        nx=True,
+        ex=PR_EVAL_LOCK_TTL_SEC,
+    )
+    return token if acquired else None
+
+
+async def release_pr_eval_lock(
+    install: str, owner: str, repo: str, number: int, token: str
+) -> None:
+    """Release the per-PR evaluation lock iff this worker still owns it."""
+    await redis_bot.eval(  # type: ignore[no-untyped-call]
+        _RELEASE_PR_EVAL_LOCK_LUA,
+        1,
+        _pr_eval_lock_key(install, owner, repo, number),
+        token,
     )
 
 
@@ -784,6 +844,46 @@ async def process_webhook_event(
         )
         return
 
+    # Serialise concurrent webhook evaluations of the same PR.  Without this
+    # guard, a burst of events lands on parallel consumers and each reads a
+    # pre-approval / pre-update snapshot, producing duplicate approvals or
+    # branch updates.
+    lock_token = await acquire_pr_eval_lock(
+        webhook_event.installation_id,
+        webhook_event.repo_owner,
+        webhook_event.repo_name,
+        webhook_event.pull_request_number,
+    )
+    if lock_token is None:
+        log.info(
+            "skip evaluation: another worker is evaluating this PR; requeuing",
+            number=webhook_event.pull_request_number,
+        )
+        await record_debug_event(
+            stage="evaluation",
+            event_type="pr_evaluation_skipped_locked",
+            message=(
+                "Skipped evaluation because another worker holds the PR "
+                "evaluation lock; requeued for retry"
+            ),
+            installation_id=webhook_event.installation_id,
+            owner=webhook_event.repo_owner,
+            repo=webhook_event.repo_name,
+            pr_number=webhook_event.pull_request_number,
+            queue_name=queue_name,
+            details={"target_branch": webhook_event.target_name},
+        )
+        await redis_bot.zadd(
+            webhook_event.get_webhook_queue_name(),
+            {
+                webhook_event.webhook_queue_member(): (
+                    time.time() + PR_EVAL_LOCK_CONTENTION_REQUEUE_DELAY_SEC
+                )
+            },
+            nx=True,
+        )
+        return
+
     log.info("evaluate pr for webhook event")
     await record_debug_event(
         stage="evaluation",
@@ -799,18 +899,27 @@ async def process_webhook_event(
             "is_active_merging": is_active_merging,
         },
     )
-    await evaluate_pr(
-        install=webhook_event.installation_id,
-        owner=webhook_event.repo_owner,
-        repo=webhook_event.repo_name,
-        number=webhook_event.pull_request_number,
-        merging=False,
-        dequeue_callback=dequeue,
-        requeue_callback=requeue,
-        queue_for_merge_callback=queue_for_merge,
-        is_active_merging=is_active_merging,
-        log=log,
-    )
+    try:
+        await evaluate_pr(
+            install=webhook_event.installation_id,
+            owner=webhook_event.repo_owner,
+            repo=webhook_event.repo_name,
+            number=webhook_event.pull_request_number,
+            merging=False,
+            dequeue_callback=dequeue,
+            requeue_callback=requeue,
+            queue_for_merge_callback=queue_for_merge,
+            is_active_merging=is_active_merging,
+            log=log,
+        )
+    finally:
+        await release_pr_eval_lock(
+            webhook_event.installation_id,
+            webhook_event.repo_owner,
+            webhook_event.repo_name,
+            webhook_event.pull_request_number,
+            lock_token,
+        )
     await record_debug_event(
         stage="evaluation",
         event_type="pr_evaluation_finished",
