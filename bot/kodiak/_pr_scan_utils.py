@@ -33,6 +33,9 @@ def is_pr_potentially_actionable(
     if pull_request.get("isDraft", False):
         return False
 
+    if pull_request.get("autoMergeRequest") is not None:
+        return True
+
     labels_node = pull_request.get("labels")
     if labels_node is None:
         # If labels data is missing, enqueue to be safe.

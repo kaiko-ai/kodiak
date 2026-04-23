@@ -207,6 +207,8 @@ async def _run_process_webhook_event_with_lock(
     mocker: Any,
     *,
     acquire_lock: bool,
+    action: Optional[str] = None,
+    cache_hit: bool = False,
     evaluate_raises: Optional[BaseException] = None,
 ) -> Tuple[_EvalLockRedisMock, AsyncMock]:
     event = WebhookEvent(
@@ -216,6 +218,7 @@ async def _run_process_webhook_event_with_lock(
         installation_id="117046149",
         target_name="main",
         head_sha=None,
+        action=action,
     )
     queue_name = event.get_webhook_queue_name()
 
@@ -232,7 +235,7 @@ async def _run_process_webhook_event_with_lock(
         ),
     )
     mocker.patch(
-        "kodiak.queue.check_nolabel_cache", mocker.AsyncMock(return_value=False)
+        "kodiak.queue.check_nolabel_cache", mocker.AsyncMock(return_value=cache_hit)
     )
     mocker.patch("kodiak.queue.record_debug_event", mocker.AsyncMock())
     if evaluate_raises is not None:
@@ -303,6 +306,17 @@ async def test_process_webhook_event_releases_lock_on_evaluate_pr_error(
 
     # Lock was released despite the exception
     assert len(redis_mock.eval_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_webhook_event_bypasses_nointent_cache_for_synthetic_events(
+    mocker: Any,
+) -> None:
+    _redis_mock, mock_evaluate_pr = await _run_process_webhook_event_with_lock(
+        mocker, acquire_lock=True, action=None, cache_hit=True
+    )
+
+    mock_evaluate_pr.assert_awaited_once()
 
 
 def test_webhook_event_queue_serialization_is_sha_aware() -> None:

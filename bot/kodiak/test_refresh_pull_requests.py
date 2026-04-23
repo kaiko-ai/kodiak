@@ -38,6 +38,16 @@ class TestIsPrPotentiallyActionable:
         }
         assert _is_pr_potentially_actionable(pr) is True
 
+    def test_pr_with_native_auto_merge_is_actionable(self) -> None:
+        pr = {
+            "number": 4,
+            "isDraft": False,
+            "autoMergeRequest": {"enabledAt": "2026-04-23T12:00:00Z"},
+            "labels": {"nodes": []},
+            "baseRef": {"name": "main"},
+        }
+        assert _is_pr_potentially_actionable(pr) is True
+
     def test_pr_with_dependencies_label_is_actionable(self) -> None:
         pr = {
             "number": 5,
@@ -95,3 +105,13 @@ class TestIsPrPotentiallyActionable:
             "baseRef": {"name": "main"},
         }
         assert _is_pr_potentially_actionable(pr) is True
+
+    def test_draft_pr_with_native_auto_merge_is_skipped(self) -> None:
+        pr = {
+            "number": 11,
+            "isDraft": True,
+            "autoMergeRequest": {"enabledAt": "2026-04-23T12:00:00Z"},
+            "labels": {"nodes": []},
+            "baseRef": {"name": "main"},
+        }
+        assert _is_pr_potentially_actionable(pr) is False

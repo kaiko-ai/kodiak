@@ -54,7 +54,7 @@ REQUEUE_ATTEMPTS_TTL = 300  # auto-expire so PRs get a fresh chance after 5 minu
 STATUS_DEDUP_PREFIX = "kodiak:last_status:"
 STATUS_DEDUP_TTL = 300  # Only re-post identical status after 5 minutes
 
-NOLABEL_CACHE_PREFIX = "kodiak:nolabel:"
+NOINTENT_CACHE_PREFIX = "kodiak:nointent:"
 NOLABEL_CACHE_TTL = int(timedelta(hours=1).total_seconds())
 # Short-lived sentinel value written by clear_nolabel_cache to prevent
 # concurrent stale evaluations from re-poisoning the cache.
@@ -91,11 +91,11 @@ def get_ingest_queue(installation_id: int) -> str:
 
 
 def _nolabel_cache_key(install: str, owner: str, repo: str, number: int) -> str:
-    return f"{NOLABEL_CACHE_PREFIX}{install}:{owner}/{repo}#{number}"
+    return f"{NOINTENT_CACHE_PREFIX}{install}:{owner}/{repo}#{number}"
 
 
 async def set_nolabel_cache(install: str, owner: str, repo: str, number: int) -> None:
-    """Cache that a PR was skipped because it lacks the automerge label.
+    """Cache that a PR was skipped because it lacks merge/update intent.
 
     Skips the write if a "cleared" sentinel is present — this means a
     label-change webhook was recently processed and a concurrent stale
@@ -109,7 +109,7 @@ async def set_nolabel_cache(install: str, owner: str, repo: str, number: int) ->
 
 
 async def check_nolabel_cache(install: str, owner: str, repo: str, number: int) -> bool:
-    """Return True if we've cached that this PR lacks the automerge label."""
+    """Return True if we've cached that this PR lacks merge/update intent."""
     result = await redis_bot.get(_nolabel_cache_key(install, owner, repo, number))
     return result == b"1"
 
@@ -308,9 +308,14 @@ async def pr_event(pr: PullRequestEvent) -> list[WebhookEvent]:
     """
     if pr.action in NON_ACTIONABLE_PULL_REQUEST_ACTIONS:
         return []
-    # Invalidate the no-automerge-label cache when labels change so that the
-    # next evaluation performs the full GitHub API check.
-    if pr.action in ("labeled", "unlabeled"):
+    # Invalidate the no-intent cache when labels or native auto-merge state
+    # changes so that the next evaluation performs the full GitHub API check.
+    if pr.action in (
+        "labeled",
+        "unlabeled",
+        "auto_merge_enabled",
+        "auto_merge_disabled",
+    ):
         await clear_nolabel_cache(
             install=str(pr.installation.id),
             owner=pr.repository.owner.login,
@@ -829,13 +834,15 @@ async def process_webhook_event(
         return await webhook_queue.enqueue_for_repo(event=webhook_event, first=first)
 
     # Skip the full evaluation cycle if we've previously cached that this PR
-    # lacks the automerge label.  The cache is invalidated when a
-    # `pull_request` webhook with action `labeled` or `unlabeled` arrives.
+    # lacks merge/update intent. The cache is invalidated by label changes and
+    # pull_request auto-merge enable/disable actions, and synthetic refresh /
+    # startup events bypass it because they have no webhook action.
     # Close events always bypass this cache so that closed PRs are promptly
     # dequeued.
     if (
         not is_active_merging
         and not is_close_event
+        and webhook_event.action is not None
         and await check_nolabel_cache(
             install=webhook_event.installation_id,
             owner=webhook_event.repo_owner,
@@ -844,13 +851,13 @@ async def process_webhook_event(
         )
     ):
         log.info(
-            "skip evaluation for cached no-automerge-label",
+            "skip evaluation for cached no-intent",
             number=webhook_event.pull_request_number,
         )
         await record_debug_event(
             stage="evaluation",
             event_type="pr_evaluation_skipped_nolabel_cache",
-            message="Skipped evaluation because PR was cached as missing the automerge label",
+            message="Skipped evaluation because PR was cached as missing merge/update intent",
             installation_id=webhook_event.installation_id,
             owner=webhook_event.repo_owner,
             repo=webhook_event.repo_name,
@@ -986,9 +993,15 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
     _key, value, score = result
     webhook_event = WebhookEvent.parse_raw(value)
     target_name = webhook_event.get_merge_target_queue_name()
+    # TTL bounds how long an orphaned marker can block the repo queue if the
+    # worker crashes or is restarted between setting the marker and the
+    # try/finally cleanup below.
+    target_marker_ttl = max(conf.MERGE_QUEUE_POLL_TIMEOUT_SEC * 2, 600)
     # mark this PR as being merged currently. we check this elsewhere to set proper status codes
-    await redis_bot.set(target_name, webhook_event.merge_queue_member())
-    await redis_bot.set(target_name + ":time", str(score))
+    await redis_bot.set(
+        target_name, webhook_event.merge_queue_member(), ex=target_marker_ttl
+    )
+    await redis_bot.set(target_name + ":time", str(score), ex=target_marker_ttl)
     await record_debug_event(
         stage="merge_queue",
         event_type="merge_started",
@@ -1021,21 +1034,25 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
         raise NotImplementedError
 
     log.info("evaluate PR for merging")
-    await evaluate_pr(
-        install=webhook_event.installation_id,
-        owner=webhook_event.repo_owner,
-        repo=webhook_event.repo_name,
-        number=webhook_event.pull_request_number,
-        dequeue_callback=dequeue,
-        requeue_callback=requeue,
-        merging=True,
-        is_active_merging=False,
-        queue_for_merge_callback=queue_for_merge,
-        log=log,
-    )
-    log.info("merge completed, remove target marker", target_name=target_name)
-    await redis_bot.delete(target_name)
-    await redis_bot.delete(target_name + ":time")
+    try:
+        await evaluate_pr(
+            install=webhook_event.installation_id,
+            owner=webhook_event.repo_owner,
+            repo=webhook_event.repo_name,
+            number=webhook_event.pull_request_number,
+            dequeue_callback=dequeue,
+            requeue_callback=requeue,
+            merging=True,
+            is_active_merging=False,
+            queue_for_merge_callback=queue_for_merge,
+            log=log,
+        )
+    finally:
+        # Always clear the target marker so an unhandled exception cannot
+        # leave the repo queue permanently blocked behind a dead PR.
+        log.info("remove target marker", target_name=target_name)
+        await redis_bot.delete(target_name)
+        await redis_bot.delete(target_name + ":time")
     await record_debug_event(
         stage="merge_queue",
         event_type="merge_finished",

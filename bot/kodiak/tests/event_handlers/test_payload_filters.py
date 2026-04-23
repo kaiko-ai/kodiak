@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 import pytest
 
 from kodiak.events.base import Installation
@@ -108,3 +110,31 @@ async def test_pr_event_keeps_actionable_pull_request_actions() -> None:
             action="synchronize",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_pr_event_clears_cache_for_native_auto_merge_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_cache = AsyncMock()
+    monkeypatch.setattr("kodiak.queue.clear_nolabel_cache", clear_cache)
+
+    event = PullRequestEvent(
+        action="auto_merge_enabled",
+        installation=Installation(id=42),
+        number=123,
+        pull_request=PullRequestPayload(base=PullRequestRef(ref="main")),
+        repository=PullRequestRepositoryPayload(
+            name="widgets",
+            owner=PullRequestOwner(login="acme"),
+        ),
+    )
+
+    await pr_event(event)
+
+    clear_cache.assert_awaited_once_with(
+        install="42",
+        owner="acme",
+        repo="widgets",
+        number=123,
+    )

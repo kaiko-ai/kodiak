@@ -80,6 +80,9 @@ query ($login: String!) {
               name
             }
             isDraft
+            autoMergeRequest {
+              enabledAt
+            }
             labels(first: 10) {
               nodes {
                 name
@@ -101,6 +104,9 @@ query ($login: String!) {
               name
             }
             isDraft
+            autoMergeRequest {
+              enabledAt
+            }
             labels(first: 10) {
               nodes {
                 name
