@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Type, Union
 
 import pydantic
@@ -19,6 +19,7 @@ from kodiak.evaluation import (
 from kodiak.messages import APICallRetry
 from kodiak.pull_request import APICallError
 from kodiak.queries import (
+    AutoMergeRequest,
     BranchProtectionRule,
     BypassActor,
     CheckConclusionState,
@@ -301,6 +302,7 @@ def create_pull_request() -> PullRequest:
         state=PullRequestState.OPEN,
         isDraft=False,
         mergeable=MergeableState.MERGEABLE,
+        autoMergeRequest=None,
         isCrossRepository=False,
         labels=["bugfix", "automerge"],
         latest_sha="f89be6c",
@@ -1801,6 +1803,112 @@ async def test_mergeable_need_update() -> None:
     assert "enqueued for merge (position=4th)" in api.set_status.calls[0]["msg"]
     assert api.queue_for_merge.call_count == 1
     assert api.dequeue.call_count == 0
+
+
+async def test_mergeable_native_auto_merge_updates_without_label() -> None:
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    pull_request.labels = []
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+
+    await mergeable(api=api, pull_request=pull_request)
+
+    assert api.update_branch.call_count == 1
+    assert api.queue_for_merge.call_count == 0
+    assert api.merge.call_count == 0
+    assert api.cache_no_automerge_label.call_count == 0
+
+
+async def test_mergeable_native_auto_merge_ready_waits_for_github_merge() -> None:
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    pull_request.labels = []
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
+
+    await mergeable(api=api, pull_request=pull_request)
+
+    assert api.set_status.call_count == 1
+    assert api.set_status.calls[0]["msg"] == "✅ ready for GitHub auto-merge"
+    assert api.queue_for_merge.call_count == 0
+    assert api.merge.call_count == 0
+
+
+async def test_mergeable_native_auto_merge_does_not_show_missing_label_message() -> (
+    None
+):
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    pull_request.labels = []
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
+    pull_request.mergeStateStatus = MergeStateStatus.DIRTY
+    pull_request.mergeable = MergeableState.CONFLICTING
+
+    await mergeable(api=api, pull_request=pull_request)
+
+    assert api.cache_no_automerge_label.call_count == 0
+    assert api.set_status.calls[0]["msg"] != "Ignored (no automerge label: 'automerge')"
+
+
+async def test_mergeable_native_auto_merge_allows_auto_approve() -> None:
+    mergeable = create_mergeable()
+    api = create_api()
+    config = create_config()
+    config.approve.auto_approve_labels = ["autoapprove"]
+    pull_request = create_pull_request()
+    pull_request.labels = ["autoapprove"]
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
+
+    await mergeable(api=api, config=config, pull_request=pull_request, bot_reviews=[])
+
+    assert api.approve_pull_request.call_count == 1
+
+
+async def test_mergeable_native_auto_merge_respects_ignored_usernames() -> None:
+    mergeable = create_mergeable()
+    api = create_api()
+    config = create_config()
+    config.update.ignored_usernames = ["barry"]
+    pull_request = create_pull_request()
+    pull_request.labels = []
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+
+    await mergeable(api=api, config=config, pull_request=pull_request)
+
+    assert api.update_branch.call_count == 0
+    assert api.dequeue.call_count == 1
+    assert (
+        "updates blocked by update.ignored_usernames" in api.set_status.calls[0]["msg"]
+    )
+
+
+async def test_mergeable_label_and_native_auto_merge_prefers_github_merge() -> None:
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
+
+    await mergeable(api=api, pull_request=pull_request)
+
+    assert api.queue_for_merge.call_count == 0
+    assert api.merge.call_count == 0
+    assert api.set_status.calls[0]["msg"] == "✅ ready for GitHub auto-merge"
 
 
 async def test_mergeable_do_not_merge() -> None:

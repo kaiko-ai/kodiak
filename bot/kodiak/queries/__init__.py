@@ -194,6 +194,9 @@ query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
       reviewDecision
       state
       mergeable
+      autoMergeRequest {
+        enabledAt
+      }
       isCrossRepository
       reviewRequests(first: 100) {
         nodes {
@@ -422,6 +425,10 @@ class ReviewThreadConnection(BaseModel):
     nodes: Optional[List[ReviewThread]]
 
 
+class AutoMergeRequest(BaseModel):
+    enabledAt: Optional[datetime] = None
+
+
 class PullRequest(BaseModel):
     id: str
     number: int
@@ -439,6 +446,7 @@ class PullRequest(BaseModel):
     reviewThreads: ReviewThreadConnection
     state: PullRequestState
     mergeable: MergeableState
+    autoMergeRequest: Optional[AutoMergeRequest] = None
     isCrossRepository: bool
     labels: List[str]
     # the SHA of the most recent commit

@@ -917,6 +917,7 @@ async def mergeable(
         pull_request_labels
     )
     has_automerge_label = len(pull_request_automerge_labels) > 0
+    has_native_auto_merge = pull_request.autoMergeRequest is not None
 
     should_dependency_automerge = (
         pull_request.author is not None
@@ -924,6 +925,12 @@ async def mergeable(
         and dep_versions_from_pr(pull_request)
         in config.merge.automerge_dependencies.versions
     )
+    has_kodiak_merge_intent = (
+        not config.merge.require_automerge_label
+        or has_automerge_label
+        or should_dependency_automerge
+    )
+    has_update_intent = has_kodiak_merge_intent or has_native_auto_merge
 
     # we should trigger mergeability checks whenever we encounter UNKNOWN.
     #
@@ -936,59 +943,53 @@ async def mergeable(
     if (
         pull_request.mergeable == MergeableState.UNKNOWN
         and pull_request.state == PullRequestState.OPEN
+        and has_update_intent
     ):
-        is_eligible = (
-            not config.merge.require_automerge_label
-            or has_automerge_label
-            or should_dependency_automerge
-        )
-        if is_eligible:
-            # we need to trigger a test commit to fix this. We do that by calling
-            # GET on the pull request endpoint.
-            await api.trigger_test_commit()
+        # we need to trigger a test commit to fix this. We do that by calling
+        # GET on the pull request endpoint.
+        await api.trigger_test_commit()
 
-            # we don't want to abort the merge if we encounter this status check.
-            # Just keep polling! The merge queue timeout handles the merging path.
-            # Requeue first so the PR is in the webhook queue as a fallback if
-            # the merge queue poll times out.
-            if merging:
-                await api.requeue()
-                raise PollForever("GitHub mergeability unknown")
-
-            attempts = await api.increment_requeue_attempts("unknown_mergeability")
-            if attempts > MAX_REQUEUE_ATTEMPTS:
-                log.warning(
-                    "unknown mergeability requeue limit exceeded — possible GitHub issue",
-                    attempts=attempts,
-                )
-                await set_status(
-                    "⚠️ GitHub cannot determine mergeability — this is likely a GitHub issue. "
-                    "Kodiak will retry on the next push or status update."
-                )
-                await record_decision(
-                    "unknown_mergeability_limit_exceeded",
-                    "Stopped retrying because GitHub mergeability stayed UNKNOWN "
-                    f"after {attempts} attempts — possible GitHub-side issue",
-                )
-                await api.dequeue()
-                return
-
-            # queue the PR for evaluation again in case GitHub doesn't send another
-            # webhook for the commit test.
+        # we don't want to abort the merge if we encounter this status check.
+        # Just keep polling! The merge queue timeout handles the merging path.
+        # Requeue first so the PR is in the webhook queue as a fallback if
+        # the merge queue poll times out.
+        if merging:
             await api.requeue()
-            log.info(
-                "merge_decision",
-                reason="requeued_unknown_mergeability",
-                attempt=attempts,
+            raise PollForever("GitHub mergeability unknown")
+
+        attempts = await api.increment_requeue_attempts("unknown_mergeability")
+        if attempts > MAX_REQUEUE_ATTEMPTS:
+            log.warning(
+                "unknown mergeability requeue limit exceeded — possible GitHub issue",
+                attempts=attempts,
+            )
+            await set_status(
+                "⚠️ GitHub cannot determine mergeability — this is likely a GitHub issue. "
+                "Kodiak will retry on the next push or status update."
             )
             await record_decision(
-                "requeued_unknown_mergeability",
-                "Requeued PR because GitHub reported unknown mergeability",
+                "unknown_mergeability_limit_exceeded",
+                "Stopped retrying because GitHub mergeability stayed UNKNOWN "
+                f"after {attempts} attempts — possible GitHub-side issue",
             )
-
-            await asyncio.sleep(REQUEUE_BACKOFF_SECONDS)
+            await api.dequeue()
             return
-        # else: fall through to automerge label check at line ~897 which dequeues
+
+        # queue the PR for evaluation again in case GitHub doesn't send another
+        # webhook for the commit test.
+        await api.requeue()
+        log.info(
+            "merge_decision",
+            reason="requeued_unknown_mergeability",
+            attempt=attempts,
+        )
+        await record_decision(
+            "requeued_unknown_mergeability",
+            "Requeued PR because GitHub reported unknown mergeability",
+        )
+
+        await asyncio.sleep(REQUEUE_BACKOFF_SECONDS)
+        return
 
     is_draft_pull_request = (
         pull_request.isDraft or pull_request.mergeStateStatus == MergeStateStatus.DRAFT
@@ -1010,11 +1011,7 @@ async def mergeable(
         # Don't approve PRs that will be immediately ignored for missing an
         # automerge label — approval is only meaningful if the PR is actually
         # eligible for merge.
-        and (
-            not config.merge.require_automerge_label
-            or has_automerge_label
-            or should_dependency_automerge
-        )
+        and has_update_intent
     ):
         # if the PR was created by an approve author or has an approve label
         # and we have not previously given an approval, approve the PR.
@@ -1035,10 +1032,10 @@ async def mergeable(
         and pull_request.mergeStateStatus == MergeStateStatus.BEHIND
     )
     update_always = config.update.always and (
-        has_automerge_label or not config.update.require_automerge_label
+        has_update_intent or not config.update.require_automerge_label
     )
     has_autoupdate_label = config.update.autoupdate_label in pull_request_labels
-    auto_update_enabled = update_always or has_autoupdate_label
+    auto_update_enabled = update_always or has_autoupdate_label or has_native_auto_merge
 
     # Dequeue pull request if out-of-date and author in
     # `update.ignored_usernames`. We cannot update or merge it.
@@ -1068,28 +1065,33 @@ async def mergeable(
             return
 
     if need_branch_update and not merging and auto_update_enabled:
+        if has_native_auto_merge:
+            update_reason = "branch updated to prepare for GitHub native auto-merge."
+        else:
+            update_reason = (
+                "branch updated because `update.always = true` is configured."
+            )
         await set_status(
             "🔄 updating branch",
-            markdown_content="branch updated because `update.always = true` is configured.",
+            markdown_content=update_reason,
         )
         await api.update_branch()
         return
 
-    if (
-        config.merge.require_automerge_label
-        and not has_automerge_label
-        and not should_dependency_automerge
-    ):
+    if not has_update_intent:
         log.info("merge_decision", reason="dequeued_no_automerge_label")
         await record_decision(
             "dequeued_no_automerge_label",
-            "Removed PR from consideration because the automerge label is missing",
+            "Removed PR from consideration because no merge or update intent was found",
             details={"required_label": config.merge.automerge_label},
         )
         await api.cache_no_automerge_label()
         await api.dequeue()
         # Update status when "show_missing_automerge_label_message" is enabled or label has been removed while already in merging state
-        if config.merge.show_missing_automerge_label_message or merging:
+        if (
+            config.merge.show_missing_automerge_label_message
+            and not has_native_auto_merge
+        ) or merging:
             await api.set_status(
                 f"Ignored (no automerge label: {config.merge.automerge_label!r})"
             )
@@ -1518,6 +1520,21 @@ branch protection requirements.
         return
 
     # okay to merge if we reach this point.
+
+    if has_native_auto_merge:
+        if wait_for_checks:
+            await set_status(
+                f"⌛️ waiting for required status checks: {missing_required_status_checks!r}"
+            )
+        elif need_branch_update:
+            await set_status("🔄 waiting for GitHub auto-merge after branch update")
+        else:
+            await set_status("✅ ready for GitHub auto-merge")
+        log.info(
+            "eligible_for_native_auto_merge",
+            ready_to_merge=ready_to_merge,
+        )
+        return
 
     if (config.merge.prioritize_ready_to_merge and ready_to_merge) or merging:
         log.info("merge_decision", reason="merge_attempted")
