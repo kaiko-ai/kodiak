@@ -1810,7 +1810,9 @@ async def test_mergeable_native_auto_merge_updates_without_label() -> None:
     api = create_api()
     pull_request = create_pull_request()
     pull_request.labels = []
-    pull_request.autoMergeRequest = AutoMergeRequest(enabledAt=datetime.now(timezone.utc))
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
     pull_request.mergeStateStatus = MergeStateStatus.BEHIND
 
     await mergeable(api=api, pull_request=pull_request)
@@ -1826,7 +1828,9 @@ async def test_mergeable_native_auto_merge_ready_waits_for_github_merge() -> Non
     api = create_api()
     pull_request = create_pull_request()
     pull_request.labels = []
-    pull_request.autoMergeRequest = AutoMergeRequest(enabledAt=datetime.now(timezone.utc))
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
 
     await mergeable(api=api, pull_request=pull_request)
 
@@ -1836,12 +1840,16 @@ async def test_mergeable_native_auto_merge_ready_waits_for_github_merge() -> Non
     assert api.merge.call_count == 0
 
 
-async def test_mergeable_native_auto_merge_does_not_show_missing_label_message() -> None:
+async def test_mergeable_native_auto_merge_does_not_show_missing_label_message() -> (
+    None
+):
     mergeable = create_mergeable()
     api = create_api()
     pull_request = create_pull_request()
     pull_request.labels = []
-    pull_request.autoMergeRequest = AutoMergeRequest(enabledAt=datetime.now(timezone.utc))
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
     pull_request.mergeStateStatus = MergeStateStatus.DIRTY
     pull_request.mergeable = MergeableState.CONFLICTING
 
@@ -1858,7 +1866,9 @@ async def test_mergeable_native_auto_merge_allows_auto_approve() -> None:
     config.approve.auto_approve_labels = ["autoapprove"]
     pull_request = create_pull_request()
     pull_request.labels = ["autoapprove"]
-    pull_request.autoMergeRequest = AutoMergeRequest(enabledAt=datetime.now(timezone.utc))
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
 
     await mergeable(api=api, config=config, pull_request=pull_request, bot_reviews=[])
 
@@ -1872,21 +1882,27 @@ async def test_mergeable_native_auto_merge_respects_ignored_usernames() -> None:
     config.update.ignored_usernames = ["barry"]
     pull_request = create_pull_request()
     pull_request.labels = []
-    pull_request.autoMergeRequest = AutoMergeRequest(enabledAt=datetime.now(timezone.utc))
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
     pull_request.mergeStateStatus = MergeStateStatus.BEHIND
 
     await mergeable(api=api, config=config, pull_request=pull_request)
 
     assert api.update_branch.call_count == 0
     assert api.dequeue.call_count == 1
-    assert "updates blocked by update.ignored_usernames" in api.set_status.calls[0]["msg"]
+    assert (
+        "updates blocked by update.ignored_usernames" in api.set_status.calls[0]["msg"]
+    )
 
 
 async def test_mergeable_label_and_native_auto_merge_prefers_github_merge() -> None:
     mergeable = create_mergeable()
     api = create_api()
     pull_request = create_pull_request()
-    pull_request.autoMergeRequest = AutoMergeRequest(enabledAt=datetime.now(timezone.utc))
+    pull_request.autoMergeRequest = AutoMergeRequest(
+        enabledAt=datetime.now(timezone.utc)
+    )
 
     await mergeable(api=api, pull_request=pull_request)
 

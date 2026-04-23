@@ -1068,7 +1068,9 @@ async def mergeable(
         if has_native_auto_merge:
             update_reason = "branch updated to prepare for GitHub native auto-merge."
         else:
-            update_reason = "branch updated because `update.always = true` is configured."
+            update_reason = (
+                "branch updated because `update.always = true` is configured."
+            )
         await set_status(
             "🔄 updating branch",
             markdown_content=update_reason,
@@ -1086,7 +1088,10 @@ async def mergeable(
         await api.cache_no_automerge_label()
         await api.dequeue()
         # Update status when "show_missing_automerge_label_message" is enabled or label has been removed while already in merging state
-        if (config.merge.show_missing_automerge_label_message and not has_native_auto_merge) or merging:
+        if (
+            config.merge.show_missing_automerge_label_message
+            and not has_native_auto_merge
+        ) or merging:
             await api.set_status(
                 f"Ignored (no automerge label: {config.merge.automerge_label!r})"
             )
