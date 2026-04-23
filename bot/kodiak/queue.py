@@ -55,10 +55,10 @@ STATUS_DEDUP_PREFIX = "kodiak:last_status:"
 STATUS_DEDUP_TTL = 300  # Only re-post identical status after 5 minutes
 
 NOINTENT_CACHE_PREFIX = "kodiak:nointent:"
-NOLABEL_CACHE_TTL = int(timedelta(hours=1).total_seconds())
+NOINTENT_CACHE_TTL = int(timedelta(hours=1).total_seconds())
 # Short-lived sentinel value written by clear_nolabel_cache to prevent
 # concurrent stale evaluations from re-poisoning the cache.
-NOLABEL_CLEARED_TTL = 120
+NOINTENT_CLEARED_TTL = 120
 
 # Per-PR evaluation lock.  Webhook consumers run with
 # WEBHOOK_CONSUMER_CONCURRENCY > 1 and a burst of events for the same PR
@@ -105,7 +105,7 @@ async def set_nolabel_cache(install: str, owner: str, repo: str, number: int) ->
     current = await redis_bot.get(key)
     if current == b"cleared":
         return
-    await redis_bot.set(key, b"1", ex=NOLABEL_CACHE_TTL)
+    await redis_bot.set(key, b"1", ex=NOINTENT_CACHE_TTL)
 
 
 async def check_nolabel_cache(install: str, owner: str, repo: str, number: int) -> bool:
@@ -124,7 +124,7 @@ async def clear_nolabel_cache(install: str, owner: str, repo: str, number: int) 
     await redis_bot.set(
         _nolabel_cache_key(install, owner, repo, number),
         b"cleared",
-        ex=NOLABEL_CLEARED_TTL,
+        ex=NOINTENT_CLEARED_TTL,
     )
 
 

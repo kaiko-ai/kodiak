@@ -990,7 +990,6 @@ async def mergeable(
 
         await asyncio.sleep(REQUEUE_BACKOFF_SECONDS)
         return
-        # else: fall through to automerge label check at line ~897 which dequeues
 
     is_draft_pull_request = (
         pull_request.isDraft or pull_request.mergeStateStatus == MergeStateStatus.DRAFT
@@ -1066,9 +1065,13 @@ async def mergeable(
             return
 
     if need_branch_update and not merging and auto_update_enabled:
+        if has_native_auto_merge:
+            update_reason = "branch updated to prepare for GitHub native auto-merge."
+        else:
+            update_reason = "branch updated because `update.always = true` is configured."
         await set_status(
             "🔄 updating branch",
-            markdown_content="branch updated because `update.always = true` is configured.",
+            markdown_content=update_reason,
         )
         await api.update_branch()
         return
